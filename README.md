@@ -11,7 +11,7 @@ The data used in this project is from the X-FACT dataset: https://huggingface.co
 
 Experiments were conducted on both **in-domain** and **out-of-domain** data.
 
-## Training the Models
+## 2. Training the Models
 
 We utilized the following multilingual models for our experiments:
 

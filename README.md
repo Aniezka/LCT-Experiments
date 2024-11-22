@@ -37,11 +37,11 @@ python train_xlmr.py --model_type attn_ea --batch_size 12 --learning_rate 2e-5 -
 To train the Claim-only Model with metadata, use the following command:
 
 ```
-python train_mt5.py --model_type claim_only --batch_size 12 --learning_rate 2e-5 --epochs 5 --max_length 360
+python train_mt5.py --model_type attn_ea --batch_size 4 --learning_rate 2e-5 --epochs 5 --max_length 360
 ```
 
 To train the Attention-based Evidence Aggregator, use the following command:
 
 ```
-python train_mt5.py --model_type claim_only --batch_size 12 --learning_rate 2e-5 --epochs 5 --max_length 360
+python train_mt5.py --model_type attn_ea --batch_size 4 --learning_rate 2e-5 --epochs 5 --max_length 360
 ```

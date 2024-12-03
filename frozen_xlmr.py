@@ -1,3 +1,4 @@
+
 import torch
 from transformers import XLMRobertaTokenizer, XLMRobertaModel
 from transformers import AdamW, get_linear_schedule_with_warmup
@@ -190,140 +191,143 @@ def train_epoch(model,train_loader,optimizer,scheduler,device) :
 
 
 def main():
-    with wandb.init() as run:
-        config = wandb.config
+    try:
+        with wandb.init() as run:
+            config = wandb.config
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            print(f"Using device: {device}")
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
+            dataset = load_dataset("utahnlp/x-fact", "all_languages")
+            model_name = "xlm-roberta-base"
+            tokenizer = XLMRobertaTokenizer.from_pretrained(model_name)
+            model = FrozenXLMRClassifier(
+                model_name,
+                num_labels=7,
+                dropout_prob=config.dropout_prob
+            ).to(device)
 
-    dataset = load_dataset("utahnlp/x-fact", "all_languages")
-    model_name = "xlm-roberta-base"
-    tokenizer = XLMRobertaTokenizer.from_pretrained(model_name)
-    model = FrozenXLMRClassifier(
-        model_name,
-        num_labels=7,
-        dropout_prob=config.dropout_prob
-    ).to(device)
+            # Verify parameter freezing
+            for name, param in model.named_parameters():
+                if 'roberta' in name:
+                    assert not param.requires_grad, f"Parameter {name} should be frozen"
+                else:
+                    assert param.requires_grad, f"Parameter {name} should be trainable"
 
-    # Verify parameter freezing
-    for name, param in model.named_parameters():
-        if 'roberta' in name:
-            assert not param.requires_grad, f"Parameter {name} should be frozen"
-        else:
-            assert param.requires_grad, f"Parameter {name} should be trainable"
+            # Create datasets and dataloaders
+            train_data = XFACTDataset(dataset['train'], tokenizer, config.max_length, config.model_type)
+            dev_data = XFACTDataset(dataset['dev'], tokenizer, config.max_length, config.model_type)
+            test_data = XFACTDataset(dataset['test'], tokenizer, config.max_length, config.model_type)
+            ood_data = XFACTDataset(dataset['ood'], tokenizer, config.max_length, config.model_type)
+            zeroshot_data = XFACTDataset(dataset['zeroshot'], tokenizer, config.max_length, config.model_type)
 
-    # Create datasets and dataloaders
-    train_data = XFACTDataset(dataset['train'], tokenizer, config.max_length, config.model_type)
-    dev_data = XFACTDataset(dataset['dev'], tokenizer, config.max_length, config.model_type)
-    test_data = XFACTDataset(dataset['test'], tokenizer, config.max_length, config.model_type)
-    ood_data = XFACTDataset(dataset['ood'], tokenizer, config.max_length, config.model_type)
-    zeroshot_data = XFACTDataset(dataset['zeroshot'], tokenizer, config.max_length, config.model_type)
-
-    train_loader = DataLoader(train_data, batch_size=config.batch_size, shuffle=True)
-    dev_loader = DataLoader(dev_data, batch_size=config.batch_size)
-    test_loader = DataLoader(test_data, batch_size=config.batch_size)
-    ood_loader = DataLoader(ood_data, batch_size=config.batch_size)
-    zeroshot_loader = DataLoader(zeroshot_data, batch_size=config.batch_size)
-
-
-    optimizer = AdamW(
-        filter(lambda p : p.requires_grad,model.parameters()),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-        eps=config.adam_epsilon
-    )
-
-    num_training_steps = len(train_loader) * config.epochs
-    num_warmup_steps = int(num_training_steps * config.warmup_ratio)
-    scheduler = get_linear_schedule_with_warmup(
-        optimizer,
-        num_warmup_steps=num_warmup_steps,
-        num_training_steps=num_training_steps
-    )
-
-    best_dev_macro_f1 = 0
-    best_metrics = {}
-    early_stopping_counter = 0
-
-    for epoch in range(config.epochs) :
-        print(f'\nEpoch {epoch + 1}/{config.epochs}')
-
-        train_loss,train_macro_f1,train_micro_f1 = train_epoch(
-            model,train_loader,optimizer,scheduler,device
-        )
-
-        dev_loss,dev_macro_f1,dev_micro_f1,dev_lang_metrics = evaluate(
-            model,dev_loader,device,"dev"
-        )
+            train_loader = DataLoader(train_data, batch_size=config.batch_size, shuffle=True)
+            dev_loader = DataLoader(dev_data, batch_size=config.batch_size)
+            test_loader = DataLoader(test_data, batch_size=config.batch_size)
+            ood_loader = DataLoader(ood_data, batch_size=config.batch_size)
+            zeroshot_loader = DataLoader(zeroshot_data, batch_size=config.batch_size)
 
 
-        if dev_macro_f1 > best_dev_macro_f1 :
-            best_dev_macro_f1 = dev_macro_f1
+            optimizer = AdamW(
+                filter(lambda p : p.requires_grad,model.parameters()),
+                lr=config.learning_rate,
+                weight_decay=config.weight_decay,
+                eps=config.adam_epsilon
+            )
+
+            num_training_steps = len(train_loader) * config.epochs
+            num_warmup_steps = int(num_training_steps * config.warmup_ratio)
+            scheduler = get_linear_schedule_with_warmup(
+                optimizer,
+                num_warmup_steps=num_warmup_steps,
+                num_training_steps=num_training_steps
+            )
+
+            best_dev_macro_f1 = 0
+            best_metrics = {}
             early_stopping_counter = 0
 
+            for epoch in range(config.epochs):
+                print(f'\nEpoch {epoch + 1}/{config.epochs}')
 
-            test_loss,test_macro_f1,test_micro_f1,test_lang_metrics = evaluate(
-                model,test_loader,device,"test"
-            )
-            ood_loss,ood_macro_f1,ood_micro_f1,ood_lang_metrics = evaluate(
-                model,ood_loader,device,"ood"
-            )
+                train_loss, train_macro_f1, train_micro_f1 = train_epoch(
+                    model, train_loader, optimizer, scheduler, device
+                )
 
-            zeroshot_loss,zeroshot_macro_f1,zeroshot_micro_f1,zeroshot_lang_metrics = evaluate(
-                model,zeroshot_loader,device,"zeroshot"
-            )
+                dev_loss, dev_macro_f1, dev_micro_f1, dev_lang_metrics = evaluate(
+                    model, dev_loader, device, "dev"
+                )
 
+                if dev_macro_f1 > best_dev_macro_f1:
+                    best_dev_macro_f1 = dev_macro_f1
+                    early_stopping_counter = 0
 
-            best_metrics = {
-                'dev_macro_f1' : dev_macro_f1,
-                'dev_micro_f1' : dev_micro_f1,
-                'test_macro_f1' : test_macro_f1,
-                'test_micro_f1' : test_micro_f1,
-                'ood_macro_f1' : ood_macro_f1,
-                'ood_micro_f1' : ood_micro_f1,
-                'zeroshot_macro_f1' : zeroshot_macro_f1,
-                'zeroshot_micro_f1' : zeroshot_micro_f1,
+                    test_loss, test_macro_f1, test_micro_f1, test_lang_metrics = evaluate(
+                        model, test_loader, device, "test"
+                    )
+                    ood_loss, ood_macro_f1, ood_micro_f1, ood_lang_metrics = evaluate(
+                        model, ood_loader, device, "ood"
+                    )
+                    zeroshot_loss, zeroshot_macro_f1, zeroshot_micro_f1, zeroshot_lang_metrics = evaluate(
+                        model, zeroshot_loader, device, "zeroshot"
+                    )
 
-            }
+                    best_metrics = {
+                        'dev_macro_f1': dev_macro_f1,
+                        'dev_micro_f1': dev_micro_f1,
+                        'test_macro_f1': test_macro_f1,
+                        'test_micro_f1': test_micro_f1,
+                        'ood_macro_f1': ood_macro_f1,
+                        'ood_micro_f1': ood_micro_f1,
+                        'zeroshot_macro_f1': zeroshot_macro_f1,
+                        'zeroshot_micro_f1': zeroshot_micro_f1,
+                    }
 
-            save_path = os.path.join(wandb.run.dir,'best_model.pt')
-            torch.save(model.state_dict(),save_path)
-            wandb.save('best_model.pt')
-        else :
-            early_stopping_counter += 1
+                    # Save model within the wandb.init() context
+                    save_path = os.path.join(run.dir, 'best_model.pt')
+                    torch.save(model.state_dict(), save_path)
+                    wandb.save('best_model.pt')
 
-        # Log metrics
-        wandb.log({
-            'epoch' : epoch + 1,
-            'train_loss' : train_loss,
-            'train_macro_f1' : train_macro_f1,
-            'train_micro_f1' : train_micro_f1,
-            'dev_loss' : dev_loss,
-            'dev_macro_f1' : dev_macro_f1,
-            'dev_micro_f1' : dev_micro_f1,
-            'current_learning_rate' : scheduler.get_last_lr()[0]
-        })
+                else:
+                    early_stopping_counter += 1
 
-        print(f'Train - Loss: {train_loss:.4f}, Macro F1: {train_macro_f1:.4f}, Micro F1: {train_micro_f1:.4f}')
-        print(f'Dev   - Loss: {dev_loss:.4f}, Macro F1: {dev_macro_f1:.4f}, Micro F1: {dev_micro_f1:.4f}')
+                # Log metrics
+                wandb.log({
+                    'epoch': epoch + 1,
+                    'train_loss': train_loss,
+                    'train_macro_f1': train_macro_f1,
+                    'train_micro_f1': train_micro_f1,
+                    'dev_loss': dev_loss,
+                    'dev_macro_f1': dev_macro_f1,
+                    'dev_micro_f1': dev_micro_f1,
+                    'current_learning_rate': scheduler.get_last_lr()[0]
+                })
 
+                print(f'Train - Loss: {train_loss:.4f}, Macro F1: {train_macro_f1:.4f}, Micro F1: {train_micro_f1:.4f}')
+                print(f'Dev   - Loss: {dev_loss:.4f}, Macro F1: {dev_macro_f1:.4f}, Micro F1: {dev_micro_f1:.4f}')
 
-        if early_stopping_counter >= config.patience :
-            print(f"\nEarly stopping triggered after {epoch + 1} epochs")
-            break
+                if early_stopping_counter >= config.patience:
+                    print(f"\nEarly stopping triggered after {epoch + 1} epochs")
+                    break
 
+            # Log final best metrics
+            wandb.log({
+                'best_dev_macro_f1': best_metrics['dev_macro_f1'],
+                'best_dev_micro_f1': best_metrics['dev_micro_f1'],
+                'best_test_macro_f1': best_metrics['test_macro_f1'],
+                'best_test_micro_f1': best_metrics['test_micro_f1'],
+                'best_ood_macro_f1': best_metrics['ood_macro_f1'],
+                'best_ood_micro_f1': best_metrics['ood_micro_f1'],
+                'best_zeroshot_macro_f1': best_metrics['zeroshot_macro_f1'],
+                'best_zeroshot_micro_f1': best_metrics['zeroshot_micro_f1'],
+            })
 
-    wandb.log({
-        'best_dev_macro_f1' : best_metrics['dev_macro_f1'],
-        'best_dev_micro_f1' : best_metrics['dev_micro_f1'],
-        'best_test_macro_f1' : best_metrics['test_macro_f1'],
-        'best_test_micro_f1' : best_metrics['test_micro_f1'],
-        'best_ood_macro_f1' : best_metrics['ood_macro_f1'],
-        'best_ood_micro_f1' : best_metrics['ood_micro_f1'],
-        'best_zeroshot_macro_f1' : best_metrics['zeroshot_macro_f1'],
-        'best_zeroshot_micro_f1' : best_metrics['zeroshot_micro_f1'],
-    })
-    wandb.finish()
+            wandb.finish()
+
+    finally:
+      if 'model' in locals():
+        del model
+      torch.cuda.empty_cache()
+      gc.collect()
 
 
 if __name__ == "__main__":

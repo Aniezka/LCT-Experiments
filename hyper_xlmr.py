@@ -121,7 +121,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, scaler):
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda'):
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
@@ -135,8 +135,9 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, scaler):
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(optimizer)
-        scaler.update()
         scheduler.step()
+        scaler.update()
+        
 
         total_loss += loss.item()
         preds = torch.argmax(logits, dim=1)

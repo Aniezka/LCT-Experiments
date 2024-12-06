@@ -188,8 +188,7 @@ def main():
                     model.parameters(),
                     lr=config.learning_rate,
                     weight_decay=config.weight_decay,
-                    eps=config.adam_epsilon,
-                    no_deprecation_warning=True  # Optional: if you want to suppress the warning
+                    eps=config.adam_epsilon
                 )
 
             num_training_steps = len(train_loader) * config.epochs

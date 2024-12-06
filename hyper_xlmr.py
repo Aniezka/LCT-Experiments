@@ -17,7 +17,6 @@ class XFACTDataset(Dataset):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.model_type = model_type
 
         self.label_map = {
             'false': 0,

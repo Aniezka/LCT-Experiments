@@ -1,5 +1,5 @@
 import torch
-from transformers import XLMRobertaTokenizer, XLMRobertaModel
+from transformers import XLMRobertaTokenizer, XLMRobertaForSequenceClassification
 from transformers import AdamW, get_linear_schedule_with_warmup
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
@@ -12,40 +12,8 @@ import os
 import torch.nn as nn
 import gc
 
-
-class XLMRClassifier(nn.Module):
-    def __init__(self, pretrained_model_name, num_labels, dropout_prob=0.1):
-        super().__init__()
-
-        self.roberta = XLMRobertaModel.from_pretrained(pretrained_model_name)
-        
-        # Remove the parameter freezing - we want to train the entire model
-        
-        self.dropout = nn.Dropout(dropout_prob)
-        self.classifier = nn.Sequential(
-            nn.Linear(self.roberta.config.hidden_size, 512),
-            nn.ReLU(),
-            nn.Dropout(dropout_prob),
-            nn.Linear(512, num_labels)
-        )
-
-    def forward(self, input_ids, attention_mask, labels=None):
-        outputs = self.roberta(input_ids=input_ids, attention_mask=attention_mask)
-        pooled_output = outputs.last_hidden_state[:,0,:]  # Get CLS token output
-
-        pooled_output = self.dropout(pooled_output)
-        logits = self.classifier(pooled_output)
-
-        loss = None
-        if labels is not None:
-            loss_fct = nn.CrossEntropyLoss()
-            loss = loss_fct(logits, labels)
-
-        return torch.nn.functional.softmax(logits, dim=1), loss
-
-
 class XFACTDataset(Dataset):
-    def __init__(self, data, tokenizer, max_length=512, model_type="claim_only"):
+    def __init__(self, data, tokenizer, max_length=512):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = max_length
@@ -66,15 +34,12 @@ class XFACTDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-
-        if self.model_type == "claim_only":
-            text = f"language: {item['language']} site: {item['site']} claim: {item['claim']}"
-        else:
-            text = f"language: {item['language']} site: {item['site']} claim: {item['claim']} "
-            for i in range(1,4):
-                ev_key = f'evidence_{i}'
-                if ev_key in item and item[ev_key]:
-                    text += f"evidence: {item[ev_key]} "
+        
+        text = f"language: {item['language']} site: {item['site']} claim: {item['claim']} "
+        for i in range(1,6):
+            ev_key = f'evidence_{i}'
+            if ev_key in item and item[ev_key]:
+                text += f"evidence: {item[ev_key]} "
 
         encoding = self.tokenizer(
             text,
@@ -92,7 +57,6 @@ class XFACTDataset(Dataset):
             'language': item['language']
         }
 
-
 def evaluate(model, eval_loader, device, data_split="eval"):
     model.eval()
     total_loss = 0
@@ -107,11 +71,14 @@ def evaluate(model, eval_loader, device, data_split="eval"):
             labels = batch['labels'].to(device)
             languages = batch['language']
 
-            logits, loss = model(
+            outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
                 labels=labels
             )
+            
+            loss = outputs.loss
+            logits = outputs.logits
 
             total_loss += loss.item()
             preds = torch.argmax(logits, dim=1)
@@ -142,42 +109,46 @@ def evaluate(model, eval_loader, device, data_split="eval"):
 
     return overall_loss, overall_macro_f1, overall_micro_f1, language_metrics
 
-
-def train_epoch(model, train_loader, optimizer, scheduler, device):
+def train_epoch(model, train_loader, optimizer, scheduler, device, scaler):
     model.train()
     total_loss = 0
     all_preds = []
     all_labels = []
 
     for batch in tqdm(train_loader, desc='Training'):
+        optimizer.zero_grad()
+        
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
 
-        logits, loss = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels
-        )
+        with torch.cuda.amp.autocast():
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
+            )
+            
+            loss = outputs.loss
+            logits = outputs.logits
+
+        scaler.scale(loss).backward()
+        scaler.unscale_(optimizer)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        scaler.step(optimizer)
+        scaler.update()
+        scheduler.step()
 
         total_loss += loss.item()
-
         preds = torch.argmax(logits, dim=1)
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
-
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        scheduler.step()
-        optimizer.zero_grad()
 
     return (
         total_loss / len(train_loader),
         f1_score(all_labels, all_preds, average='macro'),
         f1_score(all_labels, all_preds, average='micro')
     )
-
 
 def main():
     try:
@@ -190,19 +161,20 @@ def main():
             model_name = "xlm-roberta-base"
             tokenizer = XLMRobertaTokenizer.from_pretrained(model_name)
             
-            # Use the new model class
-            model = XLMRClassifier(
+            model = XLMRobertaForSequenceClassification.from_pretrained(
                 model_name,
                 num_labels=7,
-                dropout_prob=config.dropout_prob
+                problem_type="single_label_classification",
+                hidden_dropout_prob=config.dropout_prob,
+                attention_probs_dropout_prob=config.dropout_prob
             ).to(device)
 
-            # Create datasets and dataloaders
-            train_data = XFACTDataset(dataset['train'], tokenizer, config.max_length, config.model_type)
-            dev_data = XFACTDataset(dataset['dev'], tokenizer, config.max_length, config.model_type)
-            test_data = XFACTDataset(dataset['test'], tokenizer, config.max_length, config.model_type)
-            ood_data = XFACTDataset(dataset['ood'], tokenizer, config.max_length, config.model_type)
-            zeroshot_data = XFACTDataset(dataset['zeroshot'], tokenizer, config.max_length, config.model_type)
+            # Create datasets
+            train_data = XFACTDataset(dataset['train'], tokenizer, config.max_length)
+            dev_data = XFACTDataset(dataset['dev'], tokenizer, config.max_length)
+            test_data = XFACTDataset(dataset['test'], tokenizer, config.max_length)
+            ood_data = XFACTDataset(dataset['ood'], tokenizer, config.max_length)
+            zeroshot_data = XFACTDataset(dataset['zeroshot'], tokenizer, config.max_length)
 
             train_loader = DataLoader(train_data, batch_size=config.batch_size, shuffle=True)
             dev_loader = DataLoader(dev_data, batch_size=config.batch_size)
@@ -210,9 +182,9 @@ def main():
             ood_loader = DataLoader(ood_data, batch_size=config.batch_size)
             zeroshot_loader = DataLoader(zeroshot_data, batch_size=config.batch_size)
 
-            # Modified optimizer to include all parameters
+
             optimizer = AdamW(
-                model.parameters(),  # Now includes all parameters
+                model.parameters(),
                 lr=config.learning_rate,
                 weight_decay=config.weight_decay,
                 eps=config.adam_epsilon
@@ -226,6 +198,8 @@ def main():
                 num_training_steps=num_training_steps
             )
 
+            scaler = torch.cuda.amp.GradScaler()
+
             best_dev_macro_f1 = 0
             best_metrics = {}
             early_stopping_counter = 0
@@ -234,7 +208,7 @@ def main():
                 print(f'\nEpoch {epoch + 1}/{config.epochs}')
 
                 train_loss, train_macro_f1, train_micro_f1 = train_epoch(
-                    model, train_loader, optimizer, scheduler, device
+                    model, train_loader, optimizer, scheduler, device, scaler
                 )
 
                 dev_loss, dev_macro_f1, dev_micro_f1, dev_lang_metrics = evaluate(
@@ -266,10 +240,6 @@ def main():
                         'zeroshot_micro_f1': zeroshot_micro_f1,
                     }
 
-                    save_path = os.path.join(run.dir, 'best_model.pt')
-                    torch.save(model.state_dict(), save_path)
-                    wandb.save('best_model.pt')
-
                 else:
                     early_stopping_counter += 1
 
@@ -291,18 +261,7 @@ def main():
                     print(f"\nEarly stopping triggered after {epoch + 1} epochs")
                     break
 
-            wandb.log({
-                'best_dev_macro_f1': best_metrics['dev_macro_f1'],
-                'best_dev_micro_f1': best_metrics['dev_micro_f1'],
-                'best_test_macro_f1': best_metrics['test_macro_f1'],
-                'best_test_micro_f1': best_metrics['test_micro_f1'],
-                'best_ood_macro_f1': best_metrics['ood_macro_f1'],
-                'best_ood_micro_f1': best_metrics['ood_micro_f1'],
-                'best_zeroshot_macro_f1': best_metrics['zeroshot_macro_f1'],
-                'best_zeroshot_micro_f1': best_metrics['zeroshot_micro_f1'],
-            })
-
-            wandb.finish()
+            wandb.log(best_metrics)
 
     finally:
         if 'model' in locals():
@@ -310,24 +269,38 @@ def main():
         torch.cuda.empty_cache()
         gc.collect()
 
+sweep_configuration = {
+    'method': 'bayes',
+    'metric': {'name': 'dev_macro_f1', 'goal': 'maximize'},
+    'parameters': {
+        'batch_size': {'values': [8, 12, 16]},
+        'learning_rate': {
+            'distribution': 'log_uniform_values',
+            'min': 3e-4,
+            'max': 7e-4
+        },
+        'epochs': {'value': 10},
+        'max_length': {'value': 512},
+        'dropout_prob': {
+            'distribution': 'uniform',
+            'min': 0.30,
+            'max': 0.35
+        },
+        'weight_decay': {
+            'distribution': 'log_uniform_values',
+            'min': 5e-4,
+            'max': 1e-3
+        },
+        'adam_epsilon': {'value': 1e-8},
+        'warmup_ratio': {
+            'distribution': 'uniform',
+            'min': 0.03,
+            'max': 0.05
+        },
+        'patience': {'value': 3}
+    }
+}
 
 if __name__ == "__main__":
-    sweep_configuration = {
-        'method': 'bayes',
-        'metric': {'name': 'dev_macro_f1', 'goal': 'maximize'},
-        'parameters': {
-            'model_type': {'values': ['claim_only', 'attn_ea']},
-            'batch_size': {'values': [4, 8, 12, 16, 24, 32]},
-            'learning_rate': {'distribution': 'log_uniform_values', 'min': 1e-5, 'max': 5e-5},
-            'epochs': {'value': 10},
-            'max_length': {'values': [360, 512]},
-            'dropout_prob': {'distribution': 'uniform', 'min': 0.1, 'max': 0.5},
-            'weight_decay': {'distribution': 'log_uniform_values', 'min': 1e-4, 'max': 1e-2},
-            'adam_epsilon': {'value': 1e-8},
-            'warmup_ratio': {'distribution': 'uniform', 'min': 0.0, 'max': 0.2},
-            'patience': {'value': 3}
-        }
-    }
-
     sweep_id = wandb.sweep(sweep_configuration, project="experiments")
     wandb.agent(sweep_id, function=main, count=20)

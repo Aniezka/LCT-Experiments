@@ -1,6 +1,7 @@
 import torch
 from transformers import XLMRobertaTokenizer, XLMRobertaForSequenceClassification
-from transformers import AdamW, get_linear_schedule_with_warmup
+from transformers import get_linear_schedule_with_warmup
+from torch.optim import AdamW 
 from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from sklearn.metrics import f1_score
@@ -184,11 +185,12 @@ def main():
 
 
             optimizer = AdamW(
-                model.parameters(),
-                lr=config.learning_rate,
-                weight_decay=config.weight_decay,
-                eps=config.adam_epsilon
-            )
+                    model.parameters(),
+                    lr=config.learning_rate,
+                    weight_decay=config.weight_decay,
+                    eps=config.adam_epsilon,
+                    no_deprecation_warning=True  # Optional: if you want to suppress the warning
+                )
 
             num_training_steps = len(train_loader) * config.epochs
             num_warmup_steps = int(num_training_steps * config.warmup_ratio)
@@ -198,7 +200,7 @@ def main():
                 num_training_steps=num_training_steps
             )
 
-            scaler = torch.cuda.amp.GradScaler()
+            scaler = torch.amp.GradScaler('cuda')
 
             best_dev_macro_f1 = 0
             best_metrics = {}

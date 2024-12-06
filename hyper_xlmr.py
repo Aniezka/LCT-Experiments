@@ -136,8 +136,8 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, scaler):
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         scaler.step(optimizer)
-        scheduler.step()
         scaler.update()
+        scheduler.step()
         
 
         total_loss += loss.item()

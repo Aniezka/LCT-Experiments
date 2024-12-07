@@ -332,10 +332,10 @@ def run_agent(gpu_id, sweep_id, num_runs_per_agent=20):
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
         print(f"Agent {gpu_id} starting on GPU {gpu_id}")
         
-        # Initialize wandb in the child process
-        wandb.setup()
+        # Initialize a new wandb run for this agent
+        os.environ['WANDB_START_METHOD'] = 'thread'
         
-        # Run the agent
+        # Run the agent with its own wandb instance
         wandb.agent(
             sweep_id,
             function=main,
@@ -345,29 +345,25 @@ def run_agent(gpu_id, sweep_id, num_runs_per_agent=20):
     except Exception as e:
         print(f"Error in agent {gpu_id}: {str(e)}")
     finally:
-        # Cleanup
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        # Ensure wandb is properly shut down
         try:
             wandb.finish()
         except:
             pass
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
 if __name__ == "__main__":
-    # Enable proper multiprocessing start method
+    # Set multiprocessing start method
     try:
         set_start_method('spawn', force=True)
     except RuntimeError:
         pass
-    
-    # Setup signal handler
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    # Initialize wandb in the parent process
+
+    # Initialize wandb
+    os.environ['WANDB_START_METHOD'] = 'thread'
     wandb.login()
     
-    # Determine number of GPUs and agents
+    # Get GPU count
     num_gpus = torch.cuda.device_count()
     if num_gpus == 0:
         raise RuntimeError("No GPU devices available")
@@ -380,13 +376,13 @@ if __name__ == "__main__":
     # Create sweep
     sweep_id = wandb.sweep(sweep_configuration, project="experiments")
     
-    # Start processes
+    # Start processes with proper isolation
+    processes = []
     try:
         for i in range(num_agents):
             p = Process(
                 target=run_agent,
-                args=(i, sweep_id, runs_per_agent),
-                daemon=True
+                args=(i, sweep_id, runs_per_agent)
             )
             p.start()
             processes.append(p)
@@ -395,13 +391,18 @@ if __name__ == "__main__":
         for p in processes:
             p.join()
             
+    except KeyboardInterrupt:
+        print("Interrupt received, cleaning up...")
+        for p in processes:
+            p.terminate()
+        sys.exit(0)
     except Exception as e:
         print(f"Error in main process: {str(e)}")
         for p in processes:
             p.terminate()
-        # Ensure wandb is properly shut down in parent process
+        raise
+    finally:
         try:
             wandb.finish()
         except:
             pass
-        raise

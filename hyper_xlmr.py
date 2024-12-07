@@ -338,7 +338,7 @@ def run_agent(gpu_id, sweep_id, num_runs_per_agent=20):
             sweep_id,
             function=main,
             count=num_runs_per_agent,
-            project="experiments"
+            project="hyper_xlmr_experiments"
         )
     except Exception as e:
         print(f"Error in agent {gpu_id}: {str(e)}")
@@ -372,7 +372,7 @@ if __name__ == "__main__":
     print(f"Starting sweep with {num_agents} agents across {num_gpus} GPUs")
     
     # Create sweep
-    sweep_id = wandb.sweep(sweep_configuration, project="experiments")
+    sweep_id = wandb.sweep(sweep_configuration, project="hyper_xlmr_experiments")
     
     # Start processes with proper isolation
     processes = []

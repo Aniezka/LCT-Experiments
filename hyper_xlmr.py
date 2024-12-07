@@ -366,7 +366,7 @@ if __name__ == "__main__":
     if num_gpus == 0:
         raise RuntimeError("No GPU devices available")
     
-    num_agents = min(num_gpus, 2)
+    num_agents = min(num_gpus, 4)
     runs_per_agent = 20
     
     print(f"Starting sweep with {num_agents} agents across {num_gpus} GPUs")

@@ -317,13 +317,17 @@ sweep_configuration = {
 
 def run_agent(gpu_id, sweep_id, num_runs_per_agent=20):
     try:
+
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
         print(f"Agent {gpu_id} starting on GPU {gpu_id}")
-        
+
+        wandb.setup()  
+
         wandb.agent(
             sweep_id,
             function=main,
             count=num_runs_per_agent,
+            entity="aniezka", 
             project="experiments"
         )
     except Exception as e:
@@ -333,33 +337,35 @@ def run_agent(gpu_id, sweep_id, num_runs_per_agent=20):
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
 
-def signal_handler(signum, frame):
-    print("Interrupt received, cleaning up...")
-    for p in processes:
-        p.terminate()
-    sys.exit(0)
+        try:
+            wandb.finish()
+        except:
+            pass
 
 if __name__ == "__main__":
 
     try:
-        set_start_method('spawn')
+        set_start_method('spawn', force=True)
     except RuntimeError:
         pass
-
+    
     signal.signal(signal.SIGINT, signal_handler)
+    
+    wandb.login()
     
 
     num_gpus = torch.cuda.device_count()
     if num_gpus == 0:
         raise RuntimeError("No GPU devices available")
     
-    num_agents = min(num_gpus, 4)  
+    num_agents = min(num_gpus, 4)
     runs_per_agent = 20
     
     print(f"Starting sweep with {num_agents} agents across {num_gpus} GPUs")
     
 
     sweep_id = wandb.sweep(sweep_configuration, project="experiments")
+    
 
     processes = []
     try:
@@ -380,4 +386,9 @@ if __name__ == "__main__":
         print(f"Error in main process: {str(e)}")
         for p in processes:
             p.terminate()
+
+        try:
+            wandb.finish()
+        except:
+            pass
         raise

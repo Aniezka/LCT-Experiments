@@ -315,45 +315,59 @@ sweep_configuration = {
     }
 }
 
+# Global variable to store processes
+processes = []
+
+def signal_handler(signum, frame):
+    """Handle interrupt signals by cleaning up processes"""
+    print("Interrupt received, cleaning up...")
+    global processes
+    for p in processes:
+        p.terminate()
+    sys.exit(0)
+
 def run_agent(gpu_id, sweep_id, num_runs_per_agent=20):
     try:
-
+        # Set GPU device
         os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
         print(f"Agent {gpu_id} starting on GPU {gpu_id}")
-
-        wandb.setup()  
-
+        
+        # Initialize wandb in the child process
+        wandb.setup()
+        
+        # Run the agent
         wandb.agent(
             sweep_id,
             function=main,
             count=num_runs_per_agent,
-            entity="aniezka", 
             project="experiments"
         )
     except Exception as e:
         print(f"Error in agent {gpu_id}: {str(e)}")
     finally:
-
+        # Cleanup
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-
+        # Ensure wandb is properly shut down
         try:
             wandb.finish()
         except:
             pass
 
 if __name__ == "__main__":
-
+    # Enable proper multiprocessing start method
     try:
         set_start_method('spawn', force=True)
     except RuntimeError:
         pass
     
+    # Setup signal handler
     signal.signal(signal.SIGINT, signal_handler)
     
+    # Initialize wandb in the parent process
     wandb.login()
     
-
+    # Determine number of GPUs and agents
     num_gpus = torch.cuda.device_count()
     if num_gpus == 0:
         raise RuntimeError("No GPU devices available")
@@ -363,11 +377,10 @@ if __name__ == "__main__":
     
     print(f"Starting sweep with {num_agents} agents across {num_gpus} GPUs")
     
-
+    # Create sweep
     sweep_id = wandb.sweep(sweep_configuration, project="experiments")
     
-
-    processes = []
+    # Start processes
     try:
         for i in range(num_agents):
             p = Process(
@@ -378,7 +391,7 @@ if __name__ == "__main__":
             p.start()
             processes.append(p)
 
-
+        # Wait for completion
         for p in processes:
             p.join()
             
@@ -386,7 +399,7 @@ if __name__ == "__main__":
         print(f"Error in main process: {str(e)}")
         for p in processes:
             p.terminate()
-
+        # Ensure wandb is properly shut down in parent process
         try:
             wandb.finish()
         except:

@@ -33,8 +33,6 @@ class XFACTDataset(Dataset):
             'other': 6
         }
 
-        self.preprocessed = self._preprocess_data()
-
     def __len__(self):
         return len(self.data)
 

@@ -8,6 +8,7 @@ from sklearn.metrics import f1_score
 from tqdm import tqdm
 import wandb
 from datasets import load_dataset
+from multiprocessing import Process, cpu_count
 import argparse
 import os
 import torch.nn as nn
@@ -302,6 +303,21 @@ sweep_configuration = {
     }
 }
 
+
 if __name__ == "__main__":
     sweep_id = wandb.sweep(sweep_configuration, project="experiments")
-    wandb.agent(sweep_id, function=main, count=20)
+    # Number of agents to run in parallel
+    num_agents = min(cpu_count(), 4)
+
+    # Function to run an agent
+    def run_agent():
+        wandb.agent(sweep_id, function=main, count=20)
+
+    processes = []
+    for _ in range(num_agents):
+        p = Process(target=run_agent)
+        p.start()
+        processes.append(p)
+
+    for p in processes:
+        p.join()

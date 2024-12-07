@@ -30,6 +30,8 @@ class XFACTDataset(Dataset):
             'other': 6
         }
 
+        self.preprocessed = self._preprocess_data()
+
     def __len__(self):
         return len(self.data)
 
@@ -115,10 +117,9 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, scaler):
     total_loss = 0
     all_preds = []
     all_labels = []
-
-    for batch in tqdm(train_loader, desc='Training'):
-        optimizer.zero_grad()
-        
+    gradient_accumulation_steps = 2
+    
+    for batch_idx, batch in enumerate(tqdm(train_loader, desc='Training')):
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
@@ -129,19 +130,20 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, scaler):
                 attention_mask=attention_mask,
                 labels=labels
             )
-            
-            loss = outputs.loss
+            loss = outputs.loss / gradient_accumulation_steps
             logits = outputs.logits
 
         scaler.scale(loss).backward()
-        scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        scaler.step(optimizer)
-        scaler.update()
-        scheduler.step()
         
+        if (batch_idx + 1) % gradient_accumulation_steps == 0:
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            scheduler.step()
 
-        total_loss += loss.item()
+        total_loss += loss.item() * gradient_accumulation_steps
         preds = torch.argmax(logits, dim=1)
         all_preds.extend(preds.cpu().numpy())
         all_labels.extend(labels.cpu().numpy())
@@ -155,9 +157,16 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, scaler):
 def main():
     try:
         with wandb.init() as run:
+
+            torch.cuda.empty_cache()
+            
             config = wandb.config
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             print(f"Using device: {device}")
+
+            if torch.cuda.is_available():
+                torch.cuda.set_per_process_memory_fraction(0.9)
+                torch.backends.cudnn.benchmark = True
 
             dataset = load_dataset("utahnlp/x-fact", "all_languages")
             model_name = "xlm-roberta-base"
@@ -303,21 +312,69 @@ sweep_configuration = {
     }
 }
 
+def run_agent(gpu_id, sweep_id, num_runs_per_agent=20):
+    try:
+        os.environ['CUDA_VISIBLE_DEVICES'] = str(gpu_id)
+        print(f"Agent {gpu_id} starting on GPU {gpu_id}")
+        
+        wandb.agent(
+            sweep_id,
+            function=main,
+            count=num_runs_per_agent,
+            project="experiments"
+        )
+    except Exception as e:
+        print(f"Error in agent {gpu_id}: {str(e)}")
+    finally:
+
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+def signal_handler(signum, frame):
+    print("Interrupt received, cleaning up...")
+    for p in processes:
+        p.terminate()
+    sys.exit(0)
 
 if __name__ == "__main__":
-    sweep_id = wandb.sweep(sweep_configuration, project="experiments")
-    # Number of agents to run in parallel
-    num_agents = min(cpu_count(), 4)
 
-    # Function to run an agent
-    def run_agent():
-        wandb.agent(sweep_id, function=main, count=20)
+    try:
+        set_start_method('spawn')
+    except RuntimeError:
+        pass
+
+    signal.signal(signal.SIGINT, signal_handler)
+    
+
+    num_gpus = torch.cuda.device_count()
+    if num_gpus == 0:
+        raise RuntimeError("No GPU devices available")
+    
+    num_agents = min(num_gpus, 4)  
+    runs_per_agent = 20
+    
+    print(f"Starting sweep with {num_agents} agents across {num_gpus} GPUs")
+    
+
+    sweep_id = wandb.sweep(sweep_configuration, project="experiments")
 
     processes = []
-    for _ in range(num_agents):
-        p = Process(target=run_agent)
-        p.start()
-        processes.append(p)
+    try:
+        for i in range(num_agents):
+            p = Process(
+                target=run_agent,
+                args=(i, sweep_id, runs_per_agent),
+                daemon=True
+            )
+            p.start()
+            processes.append(p)
 
-    for p in processes:
-        p.join()
+
+        for p in processes:
+            p.join()
+            
+    except Exception as e:
+        print(f"Error in main process: {str(e)}")
+        for p in processes:
+            p.terminate()
+        raise

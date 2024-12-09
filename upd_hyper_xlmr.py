@@ -182,16 +182,11 @@ def train():
     )
 
     model_name = "xlm-roberta-base"
-    tokenizer = XLMRobertaTokenizer.from_pretrained(model_name)
-    config = AutoConfig.from_pretrained(
-        model_name,
-        num_labels=7,
-        use_cache=(not gradient_checkpointing),  # This is how we enable gradient checkpointing
-    )
-    model = XLMRobertaForSequenceClassification.from_pretrained(
-        model_name,
-        config=config
-    ).to(device)
+        tokenizer = XLMRobertaTokenizer.from_pretrained(model_name)
+        model = XLMRobertaForSequenceClassification.from_pretrained(
+            model_name,
+            num_labels=7
+        ).to(device)
 
     train_data = XFACTDataset(dataset['train'], tokenizer, config.max_length)
     dev_data = XFACTDataset(dataset['dev'], tokenizer, config.max_length)

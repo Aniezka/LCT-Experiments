@@ -182,8 +182,8 @@ def train():
     )
 
     model_name = "xlm-roberta-base"
-        tokenizer = XLMRobertaTokenizer.from_pretrained(model_name)
-        model = XLMRobertaForSequenceClassification.from_pretrained(
+    tokenizer = XLMRobertaTokenizer.from_pretrained(model_name)
+    model = XLMRobertaForSequenceClassification.from_pretrained(
             model_name,
             num_labels=7
         ).to(device)

@@ -9,6 +9,10 @@ import wandb
 from datasets import load_dataset
 import os
 import gc
+from transformers import AutoConfig
+import logging                     
+from typing import Dict, List 
+import math                          
 
 class XFACTDataset(Dataset):
     def __init__(self, data, tokenizer, max_length=512):
@@ -179,10 +183,14 @@ def train():
 
     model_name = "xlm-roberta-base"
     tokenizer = XLMRobertaTokenizer.from_pretrained(model_name)
-    model = XLMRobertaForSequenceClassification.from_pretrained(
+    config = AutoConfig.from_pretrained(
         model_name,
         num_labels=7,
-        gradient_checkpointing=True
+        use_cache=(not gradient_checkpointing),  # This is how we enable gradient checkpointing
+    )
+    model = XLMRobertaForSequenceClassification.from_pretrained(
+        model_name,
+        config=config
     ).to(device)
 
     train_data = XFACTDataset(dataset['train'], tokenizer, config.max_length)
@@ -282,9 +290,9 @@ if __name__ == "__main__":
                 'values': [8, 12, 16]
             },
             'learning_rate': {
-                'distribution': 'log_uniform',
-                'min': np.log(5e-6),
-                'max': np.log(5e-5)
+                'distribution': 'log_uniform_values',  # Changed from log_uniform
+                'min': 5e-6,
+                'max': 5e-5
             },
             'epochs': {
                 'value': 10
@@ -293,9 +301,9 @@ if __name__ == "__main__":
                 'value': 512
             },
             'weight_decay': {
-                'distribution': 'log_uniform',
-                'min': np.log(1e-4),
-                'max': np.log(1e-2)
+                'distribution': 'log_uniform_values',  # Changed from log_uniform
+                'min': 1e-4,
+                'max': 1e-2
             },
             'adam_beta1': {
                 'values': [0.9, 0.95]

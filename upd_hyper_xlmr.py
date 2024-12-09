@@ -12,7 +12,8 @@ import gc
 from transformers import AutoConfig
 import logging                     
 from typing import Dict, List 
-import math                          
+import math
+import argparse
 
 class XFACTDataset(Dataset):
     def __init__(self, data, tokenizer, max_length=512):
@@ -268,6 +269,14 @@ def train():
     wandb.log(best_metrics)
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--gpu_id', type=int, required=True, help='GPU ID to use')
+    parser.add_argument('--sweep_id', type=str, required=True, help='W&B sweep ID')
+    args = parser.parse_args()
+
+    # Set the GPU device
+    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+    
     sweep_configuration = {
         'method': 'bayes',
         'metric': {
@@ -285,7 +294,7 @@ if __name__ == "__main__":
                 'values': [8, 12, 16]
             },
             'learning_rate': {
-                'distribution': 'log_uniform_values',  # Changed from log_uniform
+                'distribution': 'log_uniform_values',
                 'min': 5e-6,
                 'max': 5e-5
             },
@@ -296,7 +305,7 @@ if __name__ == "__main__":
                 'value': 512
             },
             'weight_decay': {
-                'distribution': 'log_uniform_values',  # Changed from log_uniform
+                'distribution': 'log_uniform_values',
                 'min': 1e-4,
                 'max': 1e-2
             },
@@ -312,12 +321,11 @@ if __name__ == "__main__":
         }
     }
 
-    sweep_id = wandb.sweep(sweep_configuration, project="upd-hyper-xlmr")
 
-    total_runs = 20
-    parallel_agents = 4
-    num_sets = total_runs // parallel_agents
+    if args.gpu_id == 0:
+        sweep_id = wandb.sweep(sweep_configuration, project="upd-hyper-xlmr")
+        print(f"Created sweep with ID: {sweep_id}")
+    else:
+        sweep_id = args.sweep_id
 
-    for i in range(num_sets):
-        print(f"\nStarting set {i+1} of {num_sets} (agents {i*parallel_agents + 1}-{(i+1)*parallel_agents})")
-        wandb.agent(sweep_id, function=train, count=parallel_agents)
+    wandb.agent(sweep_id, function=train, count=5) 

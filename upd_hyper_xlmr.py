@@ -309,7 +309,7 @@ if __name__ == "__main__":
         }
     }
 
-    sweep_id = wandb.sweep(sweep_configuration, project="x-fact-verification")
+    sweep_id = wandb.sweep(sweep_configuration, project="upd-hyper-xlmr")
 
     total_runs = 20
     parallel_agents = 4

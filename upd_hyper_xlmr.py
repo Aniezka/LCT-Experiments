@@ -268,14 +268,20 @@ def train():
 
     wandb.log(best_metrics)
 
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpu_id', type=int, required=True, help='GPU ID to use')
     parser.add_argument('--sweep_id', type=str, required=True, help='W&B sweep ID')
     args = parser.parse_args()
 
-    # Set the GPU device
+
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+    
+
+    WANDB_PROJECT = "upd-hyper-xlmr" 
+    WANDB_ENTITY = "aniezka"       
     
     sweep_configuration = {
         'method': 'bayes',
@@ -323,9 +329,20 @@ if __name__ == "__main__":
 
 
     if args.gpu_id == 0:
-        sweep_id = wandb.sweep(sweep_configuration, project="upd-hyper-xlmr")
+        sweep_id = wandb.sweep(
+            sweep_configuration,
+            project=WANDB_PROJECT,
+            entity=WANDB_ENTITY
+        )
         print(f"Created sweep with ID: {sweep_id}")
     else:
         sweep_id = args.sweep_id
 
-    wandb.agent(sweep_id, function=train, count=5) 
+
+    wandb.agent(
+        sweep_id,
+        function=train,
+        count=5,
+        project=WANDB_PROJECT,
+        entity=WANDB_ENTITY
+    )

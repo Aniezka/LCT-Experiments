@@ -69,39 +69,57 @@ def calculate_warmup_steps(batch_size, dataset_size, epochs):
     total_steps = (dataset_size // batch_size) * epochs
     return total_steps // 10
 
-def train_epoch(model, train_loader, optimizer, scheduler, device, gradient_accumulation_steps=8):  # increased from 4
+def train_epoch(model, train_loader, optimizer, scheduler, device, gradient_accumulation_steps=16):
     model.train()
     total_loss = 0
     all_preds = []
     all_labels = []
     optimizer.zero_grad()
+    
+    # Add memory status tracking
+    if torch.cuda.is_available():
+        print(f"Initial CUDA memory allocated: {torch.cuda.memory_allocated(device) / 1024**2:.2f} MB")
+        print(f"Initial CUDA memory cached: {torch.cuda.memory_reserved(device) / 1024**2:.2f} MB")
 
     for batch_idx, batch in enumerate(tqdm(train_loader, desc='Training')):
         try:
+            # More aggressive memory cleanup
+            if batch_idx % (gradient_accumulation_steps // 2) == 0:
+                torch.cuda.empty_cache()
+                gc.collect()
 
-            torch.cuda.empty_cache()
-            gc.collect()
+            # Process smaller chunks of the batch
+            batch_size = len(batch['input_ids'])
+            sub_batch_size = batch_size // 2  # Split batch in half
+            
+            for sub_batch_start in range(0, batch_size, sub_batch_size):
+                sub_batch_end = min(sub_batch_start + sub_batch_size, batch_size)
+                
+                input_ids = batch['input_ids'][sub_batch_start:sub_batch_end].to(device)
+                attention_mask = batch['attention_mask'][sub_batch_start:sub_batch_end].to(device)
+                labels = batch['labels'][sub_batch_start:sub_batch_end].to(device)
+                
+                with torch.cuda.amp.autocast():  # Enable automatic mixed precision
+                    outputs = model(
+                        input_ids=input_ids,
+                        attention_mask=attention_mask,
+                        labels=labels
+                    )
 
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
+                loss = outputs.loss / gradient_accumulation_steps
+                loss.backward()
 
+                with torch.no_grad():
+                    preds = torch.argmax(outputs.logits, dim=1)
+                    all_preds.extend(preds.cpu().numpy())
+                    all_labels.extend(labels.cpu().numpy())
 
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
+                total_loss += loss.item() * gradient_accumulation_steps
 
-            loss = outputs.loss / gradient_accumulation_steps
-            loss.backward()
-
-            with torch.no_grad():
-                preds = torch.argmax(outputs.logits, dim=1)
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
-
-            total_loss += loss.item() * gradient_accumulation_steps
+                # Immediate cleanup
+                del outputs, loss
+                del input_ids, attention_mask, labels
+                torch.cuda.empty_cache()
 
             # Update weights every gradient_accumulation_steps batches
             if (batch_idx + 1) % gradient_accumulation_steps == 0:
@@ -110,18 +128,18 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, gradient_accu
                 scheduler.step()
                 optimizer.zero_grad()
 
-
-            del outputs, loss, input_ids, attention_mask, labels
-            torch.cuda.empty_cache()
+                # Print memory status
+                if torch.cuda.is_available():
+                    print(f"\nCUDA memory allocated: {torch.cuda.memory_allocated(device) / 1024**2:.2f} MB")
+                    print(f"CUDA memory cached: {torch.cuda.memory_reserved(device) / 1024**2:.2f} MB")
 
         except RuntimeError as e:
             if "out of memory" in str(e):
                 print(f"WARNING: out of memory on batch {batch_idx}. Skipping batch")
-                if hasattr(torch.cuda, 'empty_cache'):
-                    torch.cuda.empty_cache()
-                    gc.collect()
+                torch.cuda.empty_cache()
+                gc.collect()
                 optimizer.zero_grad()
-
+                
                 # Try to free some memory
                 if 'outputs' in locals():
                     del outputs
@@ -145,26 +163,41 @@ def evaluate(model, eval_loader, device):
     total_loss = 0
     all_preds = []
     all_labels = []
+    
+    # Reduce eval batch size
+    eval_batch_size = 2
 
     with torch.no_grad():
         for batch_idx, batch in enumerate(tqdm(eval_loader, desc='Evaluating')):
             try:
-                input_ids = batch['input_ids'].to(device)
-                attention_mask = batch['attention_mask'].to(device)
-                labels = batch['labels'].to(device)
+                # Process in smaller chunks
+                batch_size = len(batch['input_ids'])
+                sub_batch_size = eval_batch_size
+                
+                for sub_batch_start in range(0, batch_size, sub_batch_size):
+                    sub_batch_end = min(sub_batch_start + sub_batch_size, batch_size)
+                    
+                    input_ids = batch['input_ids'][sub_batch_start:sub_batch_end].to(device)
+                    attention_mask = batch['attention_mask'][sub_batch_start:sub_batch_end].to(device)
+                    labels = batch['labels'][sub_batch_start:sub_batch_end].to(device)
 
-                outputs = model(
-                    input_ids=input_ids,
-                    attention_mask=attention_mask,
-                    labels=labels
-                )
+                    with torch.cuda.amp.autocast():
+                        outputs = model(
+                            input_ids=input_ids,
+                            attention_mask=attention_mask,
+                            labels=labels
+                        )
 
-                total_loss += outputs.loss.item()
-                preds = torch.argmax(outputs.logits, dim=1)
-                all_preds.extend(preds.cpu().numpy())
-                all_labels.extend(labels.cpu().numpy())
+                    total_loss += outputs.loss.item()
+                    preds = torch.argmax(outputs.logits, dim=1)
+                    all_preds.extend(preds.cpu().numpy())
+                    all_labels.extend(labels.cpu().numpy())
 
-                if batch_idx % 10 == 0:
+                    # Immediate cleanup
+                    del outputs
+                    del input_ids, attention_mask, labels
+                    
+                if batch_idx % 5 == 0:  # More frequent cleanup
                     torch.cuda.empty_cache()
                     gc.collect()
 

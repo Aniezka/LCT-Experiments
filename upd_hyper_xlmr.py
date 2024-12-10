@@ -317,7 +317,7 @@ if __name__ == "__main__":
         },
         'parameters': {
             'batch_size': {
-                'values': [8, 12, 16]
+                'values': [4, 6, 8]
             },
             'learning_rate': {
                 'distribution': 'log_uniform_values',

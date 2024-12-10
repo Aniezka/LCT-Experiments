@@ -69,7 +69,7 @@ def calculate_warmup_steps(batch_size, dataset_size, epochs):
     total_steps = (dataset_size // batch_size) * epochs
     return total_steps // 10
 
-def train_epoch(model, train_loader, optimizer, scheduler, device, gradient_accumulation_steps=4):
+def train_epoch(model, train_loader, optimizer, scheduler, device, gradient_accumulation_steps=8):  # increased from 4
     model.train()
     total_loss = 0
     all_preds = []
@@ -78,9 +78,14 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, gradient_accu
 
     for batch_idx, batch in enumerate(tqdm(train_loader, desc='Training')):
         try:
+
+            torch.cuda.empty_cache()
+            gc.collect()
+
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
+
 
             outputs = model(
                 input_ids=input_ids,
@@ -98,15 +103,16 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, gradient_accu
 
             total_loss += loss.item() * gradient_accumulation_steps
 
+            # Update weights every gradient_accumulation_steps batches
             if (batch_idx + 1) % gradient_accumulation_steps == 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
                 optimizer.step()
                 scheduler.step()
                 optimizer.zero_grad()
 
-                if batch_idx % (gradient_accumulation_steps * 10) == 0:
-                    torch.cuda.empty_cache()
-                    gc.collect()
+
+            del outputs, loss, input_ids, attention_mask, labels
+            torch.cuda.empty_cache()
 
         except RuntimeError as e:
             if "out of memory" in str(e):
@@ -115,6 +121,18 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, gradient_accu
                     torch.cuda.empty_cache()
                     gc.collect()
                 optimizer.zero_grad()
+
+                # Try to free some memory
+                if 'outputs' in locals():
+                    del outputs
+                if 'loss' in locals():
+                    del loss
+                if 'input_ids' in locals():
+                    del input_ids
+                if 'attention_mask' in locals():
+                    del attention_mask
+                if 'labels' in locals():
+                    del labels
                 continue
             else:
                 raise e
@@ -163,12 +181,14 @@ def evaluate(model, eval_loader, device):
     return total_loss / len(eval_loader), macro_f1, micro_f1
 
 def train():
-    run = wandb.init()
-    config = wandb.config
+    torch.cuda.empty_cache()
+    gc.collect()
     
     if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        gc.collect()
+        torch.cuda.set_per_process_memory_fraction(0.9)  # Use only 90% of available memory
+        
+    run = wandb.init()
+    config = wandb.config
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")

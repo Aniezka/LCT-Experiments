@@ -38,7 +38,7 @@ class XFACTDataset(Dataset):
         item = self.data[idx]
         
         text = f"language: {item['language']} site: {item['site']} claim: {item['claim']} "
-        for i in range(1, 6):  # Support up to 5 pieces of evidence
+        for i in range(1, 6): 
             ev_key = f'evidence_{i}'
             if ev_key in item and item[ev_key]:
                 text += f"evidence_{i}: {item[ev_key]} "

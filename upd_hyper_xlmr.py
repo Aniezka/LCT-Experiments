@@ -350,7 +350,7 @@ if __name__ == "__main__":
         },
         'parameters': {
             'batch_size': {
-                'values': [4, 6, 8]
+                'values': [6, 8, 12]
             },
             'learning_rate': {
                 'distribution': 'log_uniform_values',
@@ -374,6 +374,8 @@ if __name__ == "__main__":
             'adam_beta2': {
                 'values': [0.98, 0.99, 0.999]
             },
+            'patience': {'value': 5
+                        },
             'adam_epsilon': {
                 'value': 1e-8
             }

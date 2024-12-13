@@ -332,7 +332,7 @@ def main():
     wandb.agent(
         sweep_id,
         function=train,
-        count=5,
+        count=6,
         project=WANDB_PROJECT,
         entity=WANDB_ENTITY
     )

@@ -154,6 +154,8 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, config):
     all_labels = []
     all_languages = []
     optimizer.zero_grad()
+    
+    criterion = torch.nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
 
     for batch_idx, batch in enumerate(tqdm(train_loader, desc='Training')):
         input_ids = batch['input_ids'].to(device)
@@ -165,10 +167,12 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, config):
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
-                labels=labels
+                return_dict=True
             )
+            
+            loss = criterion(outputs.logits, labels)
+            loss = loss / config.accumulation_steps
 
-        loss = outputs.loss / config.accumulation_steps
         loss.backward()
 
         with torch.no_grad():
@@ -196,6 +200,8 @@ def evaluate(model, eval_loader, device, split_name="eval"):
     all_preds = []
     all_labels = []
     all_languages = []
+    
+    criterion = torch.nn.CrossEntropyLoss()  # No label smoothing during evaluation
 
     with torch.no_grad():
         for batch in tqdm(eval_loader, desc=f'Evaluating {split_name}'):
@@ -208,10 +214,11 @@ def evaluate(model, eval_loader, device, split_name="eval"):
                 outputs = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
-                    labels=labels
+                    return_dict=True
                 )
+                loss = criterion(outputs.logits, labels)
 
-            total_loss += outputs.loss.item()
+            total_loss += loss.item()
             preds = torch.argmax(outputs.logits, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
@@ -325,11 +332,10 @@ def main():
         model_name = "google/mt5-base"
         tokenizer = MT5Tokenizer.from_pretrained(model_name)
         model = MT5ForSequenceClassification.from_pretrained(
-            model_name,
-            num_labels=7,
-            dropout_rate=config.dropout,
-            label_smoothing_factor=config.label_smoothing
-        ).to(device)
+                    model_name,
+                    num_labels=7,
+                    dropout_rate=config.dropout
+                ).to(device)
 
         dataloaders = {}
         for split_name, split_data in dataset.items():

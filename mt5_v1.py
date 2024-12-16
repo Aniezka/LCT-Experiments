@@ -253,8 +253,8 @@ def main():
         'parameters': {
             'learning_rate': {
                 'distribution': 'log_uniform_values',
-                'min': 1e-5,
-                'max': 1e-4
+                'min': 5e-6,
+                'max': 5e-5
             },
             'weight_decay': {
                 'distribution': 'log_uniform_values',
@@ -262,7 +262,7 @@ def main():
                 'max': 5e-2
             },
             'batch_size': {
-                'values': [6, 12, 18]
+                'values': [4, 8, 12]
             },
             'adam_beta2': {
                 'values': [0.98, 0.99, 0.995, 0.999]
@@ -274,7 +274,7 @@ def main():
                 'values': [0.9, 0.92, 0.95]
             },
             'max_length': {
-                'values': [384, 512, 768]
+                'values': [256, 384, 512]
             },
             'patience': {
                 'values': [3, 5, 7]
@@ -297,7 +297,7 @@ def main():
                 'values': ['language_first', 'claim_first', 'evidence_first']
             },
             'accumulation_steps': {
-                'values': [1, 2, 4]
+                'values': [4, 6, 8]
             },
             'adam_epsilon': {'value': 1e-8},
             'epochs': {

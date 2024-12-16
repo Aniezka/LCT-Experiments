@@ -88,25 +88,25 @@ class XFACTDataset(Dataset):
         item = self.data[idx]
         text = format_input(item, self.input_format)
 
-        # Add special tokens and explicit EOS token
-        text = text + " </s>"
-        
-        encoding = self.tokenizer(
-            text,
+        # MT5-specific tokenization
+        inputs = self.tokenizer.batch_encode_plus(
+            [text],
             max_length=self.max_length,
             padding='max_length',
             truncation=True,
-            return_tensors='pt',
-            add_special_tokens=True
+            return_tensors="pt",
+            return_attention_mask=True,
         )
 
         label = self.label_map.get(item['label'].lower(), 6)
+        
         return {
-            'input_ids': encoding['input_ids'].squeeze(),
-            'attention_mask': encoding['attention_mask'].squeeze(),
+            'input_ids': inputs['input_ids'].squeeze(0),  # Remove batch dimension
+            'attention_mask': inputs['attention_mask'].squeeze(0),
             'labels': torch.tensor(label),
             'languages': item['language']
         }
+ 
 
 def calculate_metrics(all_labels, all_preds):
     """Calculate both macro and micro F1 scores"""

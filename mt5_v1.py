@@ -88,12 +88,16 @@ class XFACTDataset(Dataset):
         item = self.data[idx]
         text = format_input(item, self.input_format)
 
+        # Add special tokens and explicit EOS token
+        text = text + " </s>"
+        
         encoding = self.tokenizer(
             text,
             max_length=self.max_length,
             padding='max_length',
             truncation=True,
-            return_tensors='pt'
+            return_tensors='pt',
+            add_special_tokens=True
         )
 
         label = self.label_map.get(item['label'].lower(), 6)

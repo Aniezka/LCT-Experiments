@@ -13,7 +13,6 @@ import argparse
 import os
 
 def format_input(item, format_type='language_first'):
-    """Format input text according to specified template"""
     components = {
         'language': f"language: {item['language']}",
         'site': f"site: {item['site']}",
@@ -24,7 +23,6 @@ def format_input(item, format_type='language_first'):
         'reviewDate': f"reviewDate: {item.get('reviewDate', '')}"
     }
     
-    # Filter out empty components
     filtered_components = {k: v for k, v in components.items() 
                          if v and not v.endswith(": ")}
     
@@ -88,7 +86,7 @@ class XFACTDataset(Dataset):
         item = self.data[idx]
         text = format_input(item, self.input_format)
 
-        # MT5-specific tokenization
+        # MT5 TOKENIZATION!
         inputs = self.tokenizer.batch_encode_plus(
             [text],
             max_length=self.max_length,

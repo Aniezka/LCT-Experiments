@@ -11,17 +11,11 @@ from datasets import load_dataset
 from collections import Counter
 import argparse
 import os
+import time
 os.environ["WANDB_START_METHOD"] = "thread"
 os.environ["WANDB_CONSOLE"] = "off"
 os.environ["WANDB_SILENT"] = "true"
 os.environ["PYTHONUNBUFFERED"] = "1"
-
-wandb.setup(settings={
-    "start_method": "thread",
-    "console": "off",
-    "_retry_delay": 10,
-    "_num_retries": 3
-})
 
 def format_input(item, format_type='language_first'):
     components = {
@@ -343,17 +337,35 @@ def main():
         sweep_id = args.sweep_id
 
     def train():
-        try:
-            
-            run = wandb.init(
-            settings=wandb.Settings(start_method="thread"),
-            reinit=True,
-            resume="allow"
-            )
-            if run is None:
-                print("Failed to initialize W&B run. Continuing without logging...")
+        max_retries = 3
+        retry_delay = 10
+        
+        for attempt in range(max_retries):
+            try:
+                run = wandb.init(
+                    settings=wandb.Settings(start_method="thread"),
+                    reinit=True,
+                    resume="allow"
+                )
+                if run is not None:
+                    break
+                print(f"W&B initialization attempt {attempt + 1} returned None")
+                if attempt < max_retries - 1:
+                    print(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    continue
+                print("All W&B initialization attempts failed")
                 return
-            
+            except Exception as e:
+                print(f"W&B initialization attempt {attempt + 1} failed with error: {e}")
+                if attempt < max_retries - 1:
+                    print(f"Retrying in {retry_delay} seconds...")
+                    time.sleep(retry_delay)
+                    continue
+                print("All W&B initialization attempts failed")
+                return
+        
+        try:
             config = wandb.config
             
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -519,7 +531,7 @@ def main():
             try:
                 wandb.finish()
             except Exception as e:
-                print(f"Failed to properly finish W&B run: {e}")
+                print(f"Failed to properly finish W&B run: {e}")    
 
 if __name__ == "__main__":
     main()

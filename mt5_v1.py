@@ -271,7 +271,7 @@ def main():
                 'max': 5e-2
             },
             'batch_size': {
-                'values': [4, 8, 12]
+                'values': [2, 4, 6]
             },
             'adam_beta2': {
                 'values': [0.98, 0.99, 0.995, 0.999]

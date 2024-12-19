@@ -79,11 +79,13 @@ class XFACTDataset(Dataset):
             'other': 6
         }
         
-        # Add EOS token to tokenizer if not present
-        if self.tokenizer.eos_token is None:
-            self.tokenizer.eos_token = '</s>'
-        if self.tokenizer.pad_token is None:
-            self.tokenizer.pad_token = self.tokenizer.eos_token
+        # Ensure tokenizer has required special tokens
+        special_tokens_dict = {
+            'eos_token': '</s>',
+            'pad_token': '</s>',
+            'sep_token': '</s>'
+        }
+        num_added_tokens = self.tokenizer.add_special_tokens(special_tokens_dict)
 
     def __len__(self):
         return len(self.data)
@@ -92,9 +94,11 @@ class XFACTDataset(Dataset):
         item = self.data[idx]
         text = format_input(item, self.input_format)
         
-        # Ensure text ends with EOS token
-        if not text.endswith(self.tokenizer.eos_token):
-            text = text + " " + self.tokenizer.eos_token
+        # Remove any existing EOS tokens from the text
+        text = text.replace(self.tokenizer.eos_token, "")
+        
+        # Add exactly one EOS token at the end
+        text = text + self.tokenizer.eos_token
 
         # MT5 tokenization
         encoded = self.tokenizer.encode_plus(
@@ -337,40 +341,36 @@ def main():
         print(f"Created sweep with ID: {sweep_id}")
     else:
         sweep_id = args.sweep_id
-
+        
     def train():
         run = wandb.init()
         config = wandb.config
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {device}")
-
+    
         dataset = load_dataset("utahnlp/x-fact", "all_languages")
         
         train_languages = [item['language'] for item in dataset['train']]
         language_counts = Counter(train_languages)
         wandb.run.summary['dataset_language_distribution'] = language_counts
-
+    
         model_name = "google/mt5-base"
         tokenizer = MT5Tokenizer.from_pretrained(model_name)
-        special_tokens_dict = {
-            'eos_token': '</s>',
-            'pad_token': '</s>',
-            'sep_token': '</s>'
-        }
-        tokenizer.add_special_tokens(special_tokens_dict)
+        
+        # Initialize model with correct configuration
         model = MT5ForSequenceClassification.from_pretrained(
             model_name,
             num_labels=7,
             dropout_rate=config.dropout,
-            problem_type="single_label_classification"  # Add this line
-        ).to(device)
-
+            problem_type="single_label_classification"
+        )
+        
+        # Resize token embeddings after adding special tokens
         model.resize_token_embeddings(len(tokenizer))
-        model.gradient_checkpointing_enable()  # Enable gradient checkpointing
+        model.gradient_checkpointing_enable()
         model = model.to(device)
-
-
+    
         dataloaders = {}
         for split_name, split_data in dataset.items():
             dataset_obj = XFACTDataset(split_data, tokenizer, config)

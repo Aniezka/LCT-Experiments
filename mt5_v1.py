@@ -85,22 +85,26 @@ class XFACTDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         text = format_input(item, self.input_format)
-
-        # MT5 TOKENIZATION!
-        inputs = self.tokenizer.batch_encode_plus(
-            [text],
+    
+        # MT5 specific tokenization
+        inputs = self.tokenizer(
+            text,
             max_length=self.max_length,
             padding='max_length',
             truncation=True,
-            return_tensors="pt",
-            return_attention_mask=True,
+            return_tensors=None,  # Changed from "pt" to None
+            add_special_tokens=True  # Explicitly add special tokens
         )
-
+    
+        # Convert to tensors manually
+        input_ids = torch.tensor(inputs['input_ids'])
+        attention_mask = torch.tensor(inputs['attention_mask'])
+        
         label = self.label_map.get(item['label'].lower(), 6)
         
         return {
-            'input_ids': inputs['input_ids'].squeeze(0),  # Remove batch dimension
-            'attention_mask': inputs['attention_mask'].squeeze(0),
+            'input_ids': input_ids,
+            'attention_mask': attention_mask,
             'labels': torch.tensor(label),
             'languages': item['language']
         }
@@ -164,16 +168,18 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, config, scale
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
         languages = batch['languages']
-        
+
         with torch.cuda.amp.autocast():
             outputs = model(
                 input_ids=input_ids,
                 attention_mask=attention_mask,
+                labels=labels,  # Add labels here
                 return_dict=True
             )
             
-            loss = torch.nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)(outputs.logits, labels)
+            loss = outputs.loss  # Use the model's built-in loss
             loss = loss / config.accumulation_steps
+    
         
         scaler.scale(loss).backward()
         
@@ -341,10 +347,13 @@ def main():
         model_name = "google/mt5-base"
         tokenizer = MT5Tokenizer.from_pretrained(model_name)
         model = MT5ForSequenceClassification.from_pretrained(
-                    model_name,
-                    num_labels=7,
-                    dropout_rate=config.dropout
-                ).to(device)
+            model_name,
+            num_labels=7,
+            dropout_rate=config.dropout,
+            problem_type="single_label_classification"  # Add this line
+        ).to(device)
+
+        model.gradient_checkpointing_enable()
 
         dataloaders = {}
         for split_name, split_data in dataset.items():

@@ -149,16 +149,16 @@ def get_scheduler(optimizer, num_training_steps, config):
             optimizer, num_warmup_steps, num_training_steps
         )
 
-def train_epoch(model, train_loader, optimizer, scheduler, device, config):
+def train_epoch(model, train_loader, optimizer, scheduler, device, config, scaler):
     model.train()
     total_loss = 0
     all_preds = []
     all_labels = []
     all_languages = []
-    optimizer.zero_grad()
     
-    criterion = torch.nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)
-
+    accumulated_loss = 0
+    optimizer.zero_grad()  # Zero gradients once at start
+    
     for batch_idx, batch in enumerate(tqdm(train_loader, desc='Training')):
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
@@ -172,25 +172,32 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, config):
                 return_dict=True
             )
             
-            loss = criterion(outputs.logits, labels)
+            loss = torch.nn.CrossEntropyLoss(label_smoothing=config.label_smoothing)(outputs.logits, labels)
             loss = loss / config.accumulation_steps
+        
+        scaler.scale(loss).backward()
+        
+        accumulated_loss += loss.item() * config.accumulation_steps
 
-        loss.backward()
+        if (batch_idx + 1) % config.accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip_val)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+            
+            # Add to total loss and reset accumulation
+            total_loss += accumulated_loss
+            accumulated_loss = 0
 
         with torch.no_grad():
             preds = torch.argmax(outputs.logits, dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
             all_languages.extend(languages)
-
-        total_loss += loss.item() * config.accumulation_steps
-
-        if (batch_idx + 1) % config.accumulation_steps == 0:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip_val)
-            optimizer.step()
-            scheduler.step()
-            optimizer.zero_grad()
-
+    
+    # Don't step scheduler here anymore
+    
     macro_f1, micro_f1 = calculate_metrics(all_labels, all_preds)
     language_metrics = calculate_language_metrics(all_labels, all_preds, all_languages)
     
@@ -361,13 +368,16 @@ def main():
         best_metrics = {}
         patience_counter = 0
 
+        scaler = torch.cuda.amp.GradScaler()
+
         for epoch in range(config.epochs):
             print(f'\nEpoch {epoch + 1}/{config.epochs}')
             
             # Training
             train_loss, train_macro_f1, train_micro_f1, train_lang_metrics = train_epoch(
-                model, dataloaders['train'], optimizer, scheduler, device, config
+            model, dataloaders['train'], optimizer, scheduler, device, config, scaler
             )
+            scheduler.step()
             
             # Evaluation
             metrics = {'epoch': epoch + 1}

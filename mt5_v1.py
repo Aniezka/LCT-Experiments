@@ -78,6 +78,12 @@ class XFACTDataset(Dataset):
             'unverifiable': 5,
             'other': 6
         }
+        
+        # Add EOS token to tokenizer if not present
+        if self.tokenizer.eos_token is None:
+            self.tokenizer.eos_token = '</s>'
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
 
     def __len__(self):
         return len(self.data)
@@ -85,27 +91,28 @@ class XFACTDataset(Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         text = format_input(item, self.input_format)
-    
-        # MT5 specific tokenization
-        inputs = self.tokenizer(
+        
+        # Ensure text ends with EOS token
+        if not text.endswith(self.tokenizer.eos_token):
+            text = text + " " + self.tokenizer.eos_token
+
+        # MT5 tokenization
+        encoded = self.tokenizer.encode_plus(
             text,
+            add_special_tokens=True,
             max_length=self.max_length,
             padding='max_length',
             truncation=True,
-            return_tensors=None,  # Changed from "pt" to None
-            add_special_tokens=True  # Explicitly add special tokens
+            return_attention_mask=True,
+            return_tensors=None,  # Return Python lists
         )
-    
-        # Convert to tensors manually
-        input_ids = torch.tensor(inputs['input_ids'])
-        attention_mask = torch.tensor(inputs['attention_mask'])
-        
+
         label = self.label_map.get(item['label'].lower(), 6)
         
         return {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'labels': torch.tensor(label),
+            'input_ids': torch.tensor(encoded['input_ids'], dtype=torch.long),
+            'attention_mask': torch.tensor(encoded['attention_mask'], dtype=torch.long),
+            'labels': torch.tensor(label, dtype=torch.long),
             'languages': item['language']
         }
  
@@ -346,6 +353,12 @@ def main():
 
         model_name = "google/mt5-base"
         tokenizer = MT5Tokenizer.from_pretrained(model_name)
+        special_tokens_dict = {
+            'eos_token': '</s>',
+            'pad_token': '</s>',
+            'sep_token': '</s>'
+        }
+        tokenizer.add_special_tokens(special_tokens_dict)
         model = MT5ForSequenceClassification.from_pretrained(
             model_name,
             num_labels=7,
@@ -353,7 +366,10 @@ def main():
             problem_type="single_label_classification"  # Add this line
         ).to(device)
 
-        model.gradient_checkpointing_enable()
+        model.resize_token_embeddings(len(tokenizer))
+        model.gradient_checkpointing_enable()  # Enable gradient checkpointing
+        model = model.to(device)
+
 
         dataloaders = {}
         for split_name, split_data in dataset.items():

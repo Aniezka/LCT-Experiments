@@ -13,6 +13,15 @@ import argparse
 import os
 os.environ["WANDB_START_METHOD"] = "thread"
 os.environ["WANDB_CONSOLE"] = "off"
+os.environ["WANDB_SILENT"] = "true"
+os.environ["PYTHONUNBUFFERED"] = "1"
+
+wandb.setup(settings={
+    "start_method": "thread",
+    "console": "off",
+    "_retry_delay": 10,
+    "_num_retries": 3
+})
 
 def format_input(item, format_type='language_first'):
     components = {
@@ -335,7 +344,12 @@ def main():
 
     def train():
         try:
-            run = wandb.init()
+            
+            run = wandb.init(
+            settings=wandb.Settings(start_method="thread"),
+            reinit=True,
+            resume="allow"
+            )
             if run is None:
                 print("Failed to initialize W&B run. Continuing without logging...")
                 return

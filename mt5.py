@@ -11,6 +11,8 @@ from datasets import load_dataset
 from collections import Counter
 import argparse
 import os
+os.environ["WANDB_START_METHOD"] = "thread"
+os.environ["WANDB_CONSOLE"] = "off"
 
 def format_input(item, format_type='language_first'):
     components = {
@@ -246,13 +248,19 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpu_id', type=int, required=True, help='GPU ID to use')
     parser.add_argument('--sweep_id', type=str, required=True, help='W&B sweep ID')
+    parser.add_argument('--offline', action='store_true', help='Run W&B in offline mode')
     args = parser.parse_args()
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
+    if args.offline:
+        os.environ["WANDB_MODE"] = "offline"
+    
+    os.environ["WANDB_START_METHOD"] = "thread"
+    os.environ["WANDB_CONSOLE"] = "off"
 
     WANDB_PROJECT = "mt5-search"
     WANDB_ENTITY = "aniezka"
-
+    
     sweep_configuration = {
         'method': 'bayes',
         'metric': {
@@ -326,107 +334,178 @@ def main():
         sweep_id = args.sweep_id
 
     def train():
-        run = wandb.init()
-        config = wandb.config
-        
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"Using device: {device}")
-
-        dataset = load_dataset("utahnlp/x-fact", "all_languages")
-        
-        train_languages = [item['language'] for item in dataset['train']]
-        language_counts = Counter(train_languages)
-        wandb.run.summary['dataset_language_distribution'] = language_counts
-
-        model_name = "google/mt5-base"
-        tokenizer = MT5Tokenizer.from_pretrained(model_name)
-        model = MT5ForSequenceClassification.from_pretrained(
-                    model_name,
-                    num_labels=7,
-                    dropout_rate=config.dropout
-                ).to(device)
-
-        dataloaders = {}
-        for split_name, split_data in dataset.items():
-            dataset_obj = XFACTDataset(split_data, tokenizer, config)
-            batch_size = config.batch_size
-            shuffle = (split_name == 'train')
-            dataloaders[split_name] = DataLoader(dataset_obj, batch_size=batch_size, shuffle=shuffle)
-
-        optimizer = AdamW(
-            model.parameters(),
-            lr=config.learning_rate,
-            betas=(config.adam_beta1, config.adam_beta2),
-            eps=config.adam_epsilon,
-            weight_decay=config.weight_decay
-        )
-
-        num_training_steps = len(dataloaders['train']) * config.epochs
-        scheduler = get_scheduler(optimizer, num_training_steps, config)
-
-        best_dev_macro_f1 = 0
-        best_metrics = {}
-        patience_counter = 0
-
-        scaler = torch.cuda.amp.GradScaler()
-
-        for epoch in range(config.epochs):
-            print(f'\nEpoch {epoch + 1}/{config.epochs}')
+        try:
+            run = wandb.init()
+            if run is None:
+                print("Failed to initialize W&B run. Continuing without logging...")
+                return
             
-            # Training
-            train_loss, train_macro_f1, train_micro_f1, train_lang_metrics = train_epoch(
-            model, dataloaders['train'], optimizer, scheduler, device, config, scaler
+            config = wandb.config
+            
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            print(f"Using device: {device}")
+    
+            dataset = load_dataset("utahnlp/x-fact", "all_languages")
+            
+            train_languages = [item['language'] for item in dataset['train']]
+            language_counts = Counter(train_languages)
+            try:
+                wandb.run.summary['dataset_language_distribution'] = language_counts
+            except Exception as e:
+                print(f"Failed to log language distribution to W&B: {e}")
+    
+            model_name = "google/mt5-base"
+            tokenizer = MT5Tokenizer.from_pretrained(model_name)
+            model = MT5ForSequenceClassification.from_pretrained(
+                        model_name,
+                        num_labels=7,
+                        dropout_rate=config.dropout
+                    ).to(device)
+    
+            dataloaders = {}
+            for split_name, split_data in dataset.items():
+                dataset_obj = XFACTDataset(split_data, tokenizer, config)
+                batch_size = config.batch_size
+                shuffle = (split_name == 'train')
+                dataloaders[split_name] = DataLoader(dataset_obj, batch_size=batch_size, shuffle=shuffle)
+    
+            optimizer = AdamW(
+                model.parameters(),
+                lr=config.learning_rate,
+                betas=(config.adam_beta1, config.adam_beta2),
+                eps=config.adam_epsilon,
+                weight_decay=config.weight_decay
             )
-            scheduler.step()
-            
-            # Evaluation
-            metrics = {'epoch': epoch + 1}
-            
-            metrics.update({
-                'train_loss': train_loss,
-                'train_macro_f1': train_macro_f1,
-                'train_micro_f1': train_micro_f1
-            })
-            metrics.update({f'train_{k}': v for k, v in train_lang_metrics.items()})
-            
-            # Evaluate all splits
-            for split in ['dev', 'test', 'ood', 'zeroshot']:
-                loss, macro_f1, micro_f1, lang_metrics = evaluate(
-                    model, dataloaders[split], device, split
-                )
-                metrics.update({
-                    f'{split}_loss': loss,
-                    f'{split}_macro_f1': macro_f1,
-                    f'{split}_micro_f1': micro_f1
-                })
-                metrics.update(lang_metrics)
-
-            wandb.log(metrics)
-
-            # Early stopping and model saving
-            if metrics['dev_macro_f1'] > best_dev_macro_f1:
-                best_dev_macro_f1 = metrics['dev_macro_f1']
-                best_metrics = {f'best_{k}': v for k, v in metrics.items()}
-                patience_counter = 0
+    
+            num_training_steps = len(dataloaders['train']) * config.epochs
+            scheduler = get_scheduler(optimizer, num_training_steps, config)
+    
+            best_dev_macro_f1 = 0
+            best_metrics = {}
+            patience_counter = 0
+    
+            use_amp = torch.cuda.is_available()
+            scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    
+            # Create checkpoints directory
+            os.makedirs('checkpoints', exist_ok=True)
+    
+            for epoch in range(config.epochs):
+                print(f'\nEpoch {epoch + 1}/{config.epochs}')
                 
-                model_path = os.path.join(wandb.run.dir, 'best_model.pt')
-                torch.save(model.state_dict(), model_path)
-                wandb.save('best_model.pt')
-            else:
-                patience_counter += 1
-                if patience_counter >= config.patience:
-                    print(f"Early stopping at epoch {epoch + 1}")
-                    break
-
-        wandb.log(best_metrics)
-
-    wandb.agent(
-        sweep_id,
-        function=train,
-        count=20,
-        project=WANDB_PROJECT,
-        entity=WANDB_ENTITY
-    )
+                try:
+                    # Training
+                    train_loss, train_macro_f1, train_micro_f1, train_lang_metrics = train_epoch(
+                        model, dataloaders['train'], optimizer, scheduler, device, config, scaler
+                    )
+                    scheduler.step()
+                    
+                    # Evaluation
+                    metrics = {'epoch': epoch + 1}
+                    
+                    metrics.update({
+                        'train_loss': train_loss,
+                        'train_macro_f1': train_macro_f1,
+                        'train_micro_f1': train_micro_f1
+                    })
+                    metrics.update({f'train_{k}': v for k, v in train_lang_metrics.items()})
+                    
+                    # Evaluate all splits
+                    for split in ['dev', 'test', 'ood', 'zeroshot']:
+                        loss, macro_f1, micro_f1, lang_metrics = evaluate(
+                            model, dataloaders[split], device, split
+                        )
+                        metrics.update({
+                            f'{split}_loss': loss,
+                            f'{split}_macro_f1': macro_f1,
+                            f'{split}_micro_f1': micro_f1
+                        })
+                        metrics.update(lang_metrics)
+    
+                    try:
+                        wandb.log(metrics)
+                    except Exception as e:
+                        print(f"Failed to log metrics to W&B for epoch {epoch + 1}: {e}")
+    
+                    # Model saving and early stopping
+                    if metrics['dev_macro_f1'] > best_dev_macro_f1:
+                        best_dev_macro_f1 = metrics['dev_macro_f1']
+                        best_metrics = {f'best_{k}': v for k, v in metrics.items()}
+                        patience_counter = 0
+                        
+                        # Save model
+                        model_path = os.path.join('checkpoints', f'best_model_epoch_{epoch + 1}.pt')
+                        try:
+                            torch.save({
+                                'epoch': epoch,
+                                'model_state_dict': model.state_dict(),
+                                'optimizer_state_dict': optimizer.state_dict(),
+                                'scheduler_state_dict': scheduler.state_dict(),
+                                'best_dev_macro_f1': best_dev_macro_f1,
+                                'config': config,
+                            }, model_path)
+                            
+                            try:
+                                wandb.save(model_path)
+                            except Exception as e:
+                                print(f"Failed to sync model to W&B: {e}")
+                        except Exception as e:
+                            print(f"Failed to save model checkpoint: {e}")
+                            # Try to save with minimal state
+                            try:
+                                backup_path = os.path.join('checkpoints', f'backup_model_epoch_{epoch + 1}.pt')
+                                torch.save(model.state_dict(), backup_path)
+                                print(f"Saved backup model to {backup_path}")
+                            except Exception as e2:
+                                print(f"Failed to save backup model: {e2}")
+                    else:
+                        patience_counter += 1
+                        if patience_counter >= config.patience:
+                            print(f"Early stopping triggered at epoch {epoch + 1}")
+                            break
+    
+                except Exception as e:
+                    print(f"Error during epoch {epoch + 1}: {e}")
+                    # Try to save emergency backup
+                    try:
+                        emergency_path = os.path.join('checkpoints', f'emergency_model_epoch_{epoch + 1}.pt')
+                        torch.save(model.state_dict(), emergency_path)
+                        print(f"Saved emergency backup to {emergency_path}")
+                    except Exception as e2:
+                        print(f"Failed to save emergency backup: {e2}")
+                    continue
+    
+            # Log final best metrics
+            try:
+                wandb.log(best_metrics)
+            except Exception as e:
+                print(f"Failed to log final best metrics to W&B: {e}")
+                print("Best metrics:", best_metrics)
+            
+            # Save final model
+            try:
+                final_path = os.path.join('checkpoints', 'final_model.pt')
+                torch.save({
+                    'model_state_dict': model.state_dict(),
+                    'best_dev_macro_f1': best_dev_macro_f1,
+                    'best_metrics': best_metrics,
+                    'config': config,
+                }, final_path)
+                try:
+                    wandb.save(final_path)
+                except Exception as e:
+                    print(f"Failed to sync final model to W&B: {e}")
+            except Exception as e:
+                print(f"Failed to save final model: {e}")
+    
+        except Exception as e:
+            print(f"Training failed with error: {e}")
+            raise
+        finally:
+            try:
+                wandb.finish()
+            except Exception as e:
+                print(f"Failed to properly finish W&B run: {e}")
 
 if __name__ == "__main__":
     main()

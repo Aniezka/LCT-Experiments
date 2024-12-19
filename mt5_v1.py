@@ -61,7 +61,6 @@ def format_input(item, format_type='language_first'):
         text += filtered_components['claim']
     
     return text.strip()
-
 class XFACTDataset(Dataset):
     def __init__(self, data, tokenizer, config):
         self.data = data
@@ -78,44 +77,28 @@ class XFACTDataset(Dataset):
             'unverifiable': 5,
             'other': 6
         }
-        
-        # Ensure tokenizer has required special tokens
-        special_tokens_dict = {
-            'eos_token': '</s>',
-            'pad_token': '</s>',
-            'sep_token': '</s>'
-        }
-        num_added_tokens = self.tokenizer.add_special_tokens(special_tokens_dict)
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        text = format_input(item, self.input_format)
+        text = format_input(item, self.input_format)  # Keep your sophisticated format_input function
         
-        # Remove any existing EOS tokens from the text
-        text = text.replace(self.tokenizer.eos_token, "")
-        
-        # Add exactly one EOS token at the end
-        text = text + self.tokenizer.eos_token
-
-        # MT5 tokenization
-        encoded = self.tokenizer.encode_plus(
+        # Use the working tokenization approach
+        encoding = self.tokenizer(
             text,
-            add_special_tokens=True,
             max_length=self.max_length,
             padding='max_length',
             truncation=True,
-            return_attention_mask=True,
-            return_tensors=None,  # Return Python lists
+            return_tensors='pt'
         )
 
         label = self.label_map.get(item['label'].lower(), 6)
         
         return {
-            'input_ids': torch.tensor(encoded['input_ids'], dtype=torch.long),
-            'attention_mask': torch.tensor(encoded['attention_mask'], dtype=torch.long),
+            'input_ids': encoding['input_ids'].squeeze(),
+            'attention_mask': encoding['attention_mask'].squeeze(),
             'labels': torch.tensor(label, dtype=torch.long),
             'languages': item['language']
         }

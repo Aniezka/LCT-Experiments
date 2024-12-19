@@ -12,6 +12,13 @@ from collections import Counter
 import argparse
 import os
 
+def set_seed(seed):
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    torch.backends.cudnn.deterministic = True
+
 def format_input(item, format_type='language_first'):
     components = {
         'language': f"language: {item['language']}",
@@ -328,6 +335,10 @@ def main():
     def train():
         run = wandb.init()
         config = wandb.config
+
+        seed = int(time.time())
+        set_seed(seed)
+        wandb.config.update({"random_seed": seed})
         
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         print(f"Using device: {device}")
@@ -359,7 +370,21 @@ def main():
             dataset_obj = XFACTDataset(split_data, tokenizer, config)
             batch_size = config.batch_size
             shuffle = (split_name == 'train')
-            dataloaders[split_name] = DataLoader(dataset_obj, batch_size=batch_size, shuffle=shuffle)
+            
+            # Add generator only for training dataloader
+            if shuffle:
+                dataloaders[split_name] = DataLoader(
+                    dataset_obj, 
+                    batch_size=batch_size, 
+                    shuffle=True,
+                    generator=torch.Generator().manual_seed(seed)
+                )
+            else:
+                dataloaders[split_name] = DataLoader(
+                    dataset_obj, 
+                    batch_size=batch_size, 
+                    shuffle=False
+                )
 
         optimizer = AdamW(
             model.parameters(),

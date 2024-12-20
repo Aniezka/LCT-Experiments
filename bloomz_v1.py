@@ -482,15 +482,14 @@ def train() :
         torch.cuda.empty_cache()
         wandb.finish()
 
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sweep_id', type=str, required=True)
     args = parser.parse_args()
 
-    WANDB_PROJECT = "mt0-search" 
+    WANDB_PROJECT = "mt0-search"
     WANDB_ENTITY = "aniezka"
-    
+
     sweep_configuration = {
         'method': 'bayes',
         'metric': {
@@ -566,7 +565,7 @@ def main():
             f.write(sweep_id)
     else:
         sweep_id = args.sweep_id
-    
+
     wandb.agent(
         sweep_id,
         function=train,

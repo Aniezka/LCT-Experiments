@@ -49,7 +49,6 @@ def format_input(item, format_type='language_first'):
     """Format input text according to specified template"""
     components = {
         'language': f"language: {item['language']}",
-        'site': f"site: {item['site']}",
         'claim': f"claim: {item['claim']}",
         'evidence': "",
         'claimant': f"claimant: {item.get('claimant', '')}",
@@ -68,7 +67,7 @@ def format_input(item, format_type='language_first'):
     
     # Different ordering based on format_type
     if format_type == 'language_first':
-        text = f"{filtered_components['language']} {filtered_components['site']} "
+        text = f"{filtered_components['language']}"
         if 'claimant' in filtered_components:
             text += f"{filtered_components['claimant']} "
         if 'claimDate' in filtered_components:
@@ -84,10 +83,10 @@ def format_input(item, format_type='language_first'):
             text += f"{filtered_components['claimDate']} "
         if 'reviewDate' in filtered_components:
             text += f"{filtered_components['reviewDate']} "
-        text += f"{filtered_components['language']} {filtered_components['site']} {components['evidence']}"
+        text += f"{filtered_components['language']} {components['evidence']}"
     else:  # evidence_first
         text = f"{components['evidence']}"
-        text += f"{filtered_components['language']} {filtered_components['site']} "
+        text += f"{filtered_components['language']} "
         if 'claimant' in filtered_components:
             text += f"{filtered_components['claimant']} "
         if 'claimDate' in filtered_components:

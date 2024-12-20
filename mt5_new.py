@@ -97,104 +97,101 @@ def compute_metrics(pred: EvalPrediction, all_languages: List[str]) -> Dict:
     
     return metrics
 
-def train(config=None):
-    with wandb.init(config=config) as run:
-        config = wandb.config
+def train():
+    run = wandb.init()
+    config = wandb.config
+
+    # Initialize mixed precision scaler with more conservative growth
+    scaler = torch.cuda.amp.GradScaler(
+        init_scale=2**10,
+        growth_factor=1.5,
+        backoff_factor=0.5,
+        growth_interval=100
+    )
+    
+    # Get process ID and set device
+    process_id = int(os.environ.get("PROCESS_ID", 0))
+    device = torch.device(f'cuda:{process_id}' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    # Load model with float32 initialization for better stability
+    model = MT5ForSequenceClassification.from_pretrained(
+        'google/mt5-base',
+        num_labels=7,
+        torch_dtype=torch.float32
+    ).to(device)
+    model.gradient_checkpointing_enable()
+    
+    tokenizer = MT5TokenizerFast.from_pretrained('google/mt5-base')
+
+    # Load dataset and create dataloaders
+    dataset = load_dataset("utahnlp/x-fact", "all_languages")
+    dataloaders = {}
+    for split_name, split_data in dataset.items():
+        dataset_obj = XFACTDataset(split_data, tokenizer, config)
+        batch_size = config.batch_size
+        shuffle = (split_name == 'train')
+        dataloaders[split_name] = DataLoader(dataset_obj, batch_size=batch_size, shuffle=shuffle)
+
+    optimizer = AdamW(
+        model.parameters(),
+        lr=config.learning_rate,
+        betas=(config.adam_beta1, config.adam_beta2),
+        eps=config.adam_epsilon,
+        weight_decay=config.weight_decay
+    )
+
+    num_training_steps = len(dataloaders['train']) * config.epochs
+    scheduler = get_scheduler(optimizer, num_training_steps, config)
+
+    best_dev_macro_f1 = 0
+    best_metrics = {}
+
+    for epoch in range(config.epochs):
+        print(f'\nEpoch {epoch + 1}/{config.epochs}')
         
-        # Load tokenizer and model
-        tokenizer = MT5TokenizerFast.from_pretrained('google/mt5-base')
-        model = MT5ForSequenceClassification.from_pretrained(
-            'google/mt5-base',
-            num_labels=len(LABEL_MAP)
+        train_loss, train_macro_f1, train_micro_f1, train_lang_metrics = train_epoch(
+            model, dataloaders['train'], optimizer, scheduler, scaler, device, config
         )
         
-        # Enable gradient checkpointing after model initialization
-        model.gradient_checkpointing_enable()
+        metrics = {'epoch': epoch + 1}
         
-        # Enable mixed precision training
-        scaler = torch.cuda.amp.GradScaler()
+        metrics.update({
+            'train_loss': train_loss,
+            'train_macro_f1': train_macro_f1,
+            'train_micro_f1': train_micro_f1
+        })
+        metrics.update({f'train_{k}': v for k, v in train_lang_metrics.items()})
         
-        # Load dataset
-        dataset = load_dataset("utahnlp/x-fact", "all_languages")
-        
-        # Track language distribution
-        train_languages = [item['language'] for item in dataset['train']]
-        language_counts = Counter(train_languages)
-        wandb.run.summary['dataset_language_distribution'] = dict(language_counts)
-        
-        train_dataset = XFACTDataset(dataset['train'], tokenizer)
-        dev_dataset = XFACTDataset(dataset['dev'], tokenizer)
-        test_dataset = XFACTDataset(dataset['test'], tokenizer)
-        ood_dataset = XFACTDataset(dataset['ood'], tokenizer)
-        zeroshot_dataset = XFACTDataset(dataset['zeroshot'], tokenizer)
-        
-        # Get unique languages
-        all_languages = list(set(item['language'] for item in dataset['train']))
-        
-        # Training arguments
-        training_args = TrainingArguments(
-            output_dir=f"./results/{run.id}",
-            learning_rate=config.learning_rate,
-            per_device_train_batch_size=config.batch_size,
-            per_device_eval_batch_size=config.batch_size,
-            num_train_epochs=config.epochs,
-            weight_decay=config.weight_decay,
-            logging_dir=f"./logs/{run.id}",
-            logging_steps=100,
-            eval_steps=500,
-            save_steps=500,
-            evaluation_strategy="steps",
-            load_best_model_at_end=True,
-            metric_for_best_model="macro_f1",
-            report_to="wandb",
-            gradient_accumulation_steps=config.accumulation_steps,
-            max_grad_norm=config.gradient_clip_val,
-            warmup_ratio=config.warmup_ratio,
-            fp16=True,
-            save_total_limit=3
-        )
-        
-        # Initialize trainer
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            train_dataset=train_dataset,
-            eval_dataset=dev_dataset,
-            compute_metrics=lambda pred: compute_metrics(pred, all_languages)
-        )
-        
-        # Train and evaluate
-        trainer.train()
-        
-        # Evaluate on all splits
-        dev_metrics = trainer.evaluate(dev_dataset)
-        test_metrics = trainer.evaluate(test_dataset)
-        ood_metrics = trainer.evaluate(ood_dataset)
-        zeroshot_metrics = trainer.evaluate(zeroshot_dataset)
-        
-        # Prefix metrics for each split
-        dev_metrics = {f"dev_{k}": v for k, v in dev_metrics.items()}
-        test_metrics = {f"test_{k}": v for k, v in test_metrics.items()}
-        ood_metrics = {f"ood_{k}": v for k, v in ood_metrics.items()}
-        zeroshot_metrics = {f"zeroshot_{k}": v for k, v in zeroshot_metrics.items()}
-        
-        # Combine all metrics
-        all_metrics = {
-            **dev_metrics,
-            **test_metrics,
-            **ood_metrics,
-            **zeroshot_metrics
-        }
-        
-        # Log metrics
-        wandb.log(all_metrics)
-        
-        # Save best model
-        trainer.save_model(f"./best_model/{run.id}")
+        for split in ['dev', 'test', 'ood', 'zeroshot']:
+            loss, macro_f1, micro_f1, lang_metrics = evaluate(
+                model, dataloaders[split], device, split
+            )
+            metrics.update({
+                f'{split}_loss': loss,
+                f'{split}_macro_f1': macro_f1,
+                f'{split}_micro_f1': micro_f1
+            })
+            metrics.update(lang_metrics)
+
+        wandb.log(metrics)
+
+        # Save best model based on dev macro F1
+        if metrics['dev_macro_f1'] > best_dev_macro_f1:
+            best_dev_macro_f1 = metrics['dev_macro_f1']
+            best_metrics = {f'best_{k}': v for k, v in metrics.items()}
+            
+            model_path = os.path.join(wandb.run.dir, 'best_model.pt')
+            torch.save(model.state_dict(), model_path)
+            wandb.save('best_model.pt')
+
+    wandb.log(best_metrics)
+           
 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--sweep_id', type=str, required=True, help='W&B sweep ID')
+    parser.add_argument('--process_id', type=int, default=0, help='Process ID for cluster')
     args = parser.parse_args()
     
     WANDB_PROJECT = "mt5-search"

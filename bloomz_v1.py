@@ -337,12 +337,11 @@ def train():
  
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--gpu_id', type=int, required=True, help='GPU ID to use')
     parser.add_argument('--sweep_id', type=str, required=True, help='W&B sweep ID')
     args = parser.parse_args()
 
-    os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
-
+    # No need to set CUDA_VISIBLE_DEVICES as it's handled by Condor
+    
     WANDB_PROJECT = "mt0-search" 
     WANDB_ENTITY = "aniezka"       
     
@@ -364,7 +363,7 @@ def main():
                 'max': 1e-2
             },
             'batch_size': {
-                'values': [1, 2, 4]  # Reduced batch sizes for limited GPU memory
+                'values': [2, 4, 8]  # Slightly larger batch sizes possible with smaller model
             },
             'adam_beta2': {
                 'values': [0.98, 0.99]

@@ -333,9 +333,9 @@ def train():
     process_offset = int(process_id) * 10000  # Ensure different seed ranges for each process
     seed = (base_seed + process_offset) % (2**32 - 1)
     set_seed(seed)
-    
+
     # Use the GPU assigned by Condor via CUDA_VISIBLE_DEVICES
-    if not torch.cuda.is_available() :
+    if not torch.cuda.is_available():
         raise RuntimeError("No CUDA device available. Check CUDA_VISIBLE_DEVICES setting.")
 
     device = torch.device('cuda')
@@ -346,27 +346,33 @@ def train():
     gpu_name = torch.cuda.get_device_name(gpu_id)
     print(f"Process {process_id} using GPU {gpu_id}: {gpu_name}")
     wandb.run.summary.update({
-        "process_id" : process_id,
-        "gpu_id" : gpu_id,
-        "gpu_name" : gpu_name,
-        "seed" : seed
+        "process_id": process_id,
+        "gpu_id": gpu_id,
+        "gpu_name": gpu_name,
+        "seed": seed
     })
 
+    # Initialize variables before try block
+    model = None
+    optimizer = None
+    scheduler = None
     scaler = torch.cuda.amp.GradScaler()
 
-    try :
-        # Load dataset with the unique seed
-        dataset = load_dataset(
-            "utahnlp/x-fact",
-            "all_languages",
-            split_seed=seed
-        )
+    try:
+        # Load dataset
+        print("Loading dataset...")
+        dataset = load_dataset("utahnlp/x-fact", "all_languages")
+        
+        # Manually shuffle the training data using seed
+        if 'train' in dataset:
+            dataset['train'] = dataset['train'].shuffle(seed=seed)
 
         train_languages = [item['language'] for item in dataset['train']]
         language_counts = Counter(train_languages)
         wandb.run.summary['dataset_language_distribution'] = language_counts
 
         # Initialize model with deterministic settings
+        print("Initializing model and tokenizer...")
         model_name = "bigscience/mt0-small"
         tokenizer = MT5TokenizerFast.from_pretrained(model_name)
         model = MT5ForSequenceClassification.from_pretrained(
@@ -376,109 +382,122 @@ def train():
             use_cache=False
         ).to(device)
 
+        if model is None:
+            raise RuntimeError("Failed to initialize model")
+
         model = model.train()
         model.gradient_checkpointing_enable()
 
+        print("Initializing dataloaders...")
         # Initialize dataloaders with process-specific worker_init_fn
-        def worker_init_fn(worker_id) :
+        def worker_init_fn(worker_id):
             worker_seed = seed + worker_id
             np.random.seed(worker_seed)
             random.seed(worker_seed)
             torch.manual_seed(worker_seed)
 
         dataloaders = {}
-        for split_name,split_data in dataset.items() :
-            dataset_obj = XFACTDataset(split_data,tokenizer,config)
-            batch_size = config.batch_size
-            shuffle = (split_name == 'train')
-            dataloaders[split_name] = DataLoader(
-                dataset_obj,
-                batch_size=batch_size,
-                shuffle=shuffle,
-                worker_init_fn=worker_init_fn,
-                num_workers=2,  # Reduced from 10 to avoid overwhelming the system
-                pin_memory=True,
-                persistent_workers=True
-            )
+        for split_name, split_data in dataset.items():
+            try:
+                dataset_obj = XFACTDataset(split_data, tokenizer, config)
+                batch_size = config.batch_size
+                shuffle = (split_name == 'train')
+                dataloaders[split_name] = DataLoader(
+                    dataset_obj,
+                    batch_size=batch_size,
+                    shuffle=shuffle,
+                    worker_init_fn=worker_init_fn,
+                    num_workers=2,
+                    pin_memory=True,
+                    persistent_workers=True
+                )
+                print(f"Created dataloader for {split_name} with {len(dataset_obj)} samples")
+            except Exception as e:
+                print(f"Error creating dataloader for {split_name}: {str(e)}")
+                raise
 
-        if config.frozen_layers > 0 :
-            for i in range(config.frozen_layers) :
-                for param in model.encoder.block[i].parameters() :
+        if config.frozen_layers > 0:
+            for i in range(config.frozen_layers):
+                for param in model.encoder.block[i].parameters():
                     param.requires_grad = False
+            print(f"Froze first {config.frozen_layers} layers")
 
         optimizer = AdamW(
             model.parameters(),
             lr=config.learning_rate,
-            betas=(config.adam_beta1,config.adam_beta2),
+            betas=(config.adam_beta1, config.adam_beta2),
             eps=config.adam_epsilon,
             weight_decay=config.weight_decay
         )
 
         num_training_steps = len(dataloaders['train']) * config.epochs
-        scheduler = get_scheduler(optimizer,num_training_steps,config)
+        scheduler = get_scheduler(optimizer, num_training_steps, config)
 
         best_dev_macro_f1 = 0
         best_metrics = {}
 
         # Training loop
-        for epoch in range(config.epochs) :
+        for epoch in range(config.epochs):
             print(f'\nProcess {process_id} - Epoch {epoch + 1}/{config.epochs}')
 
-            train_loss,train_macro_f1,train_micro_f1,train_lang_metrics = train_epoch(
-                model,dataloaders['train'],optimizer,scheduler,scaler,device,config
+            train_loss, train_macro_f1, train_micro_f1, train_lang_metrics = train_epoch(
+                model, dataloaders['train'], optimizer, scheduler, scaler, device, config
             )
 
             metrics = {
-                'epoch' : epoch + 1,
-                'train_loss' : train_loss,
-                'train_macro_f1' : train_macro_f1,
-                'train_micro_f1' : train_micro_f1,
-                'process_id' : process_id
+                'epoch': epoch + 1,
+                'train_loss': train_loss,
+                'train_macro_f1': train_macro_f1,
+                'train_micro_f1': train_micro_f1,
+                'process_id': process_id
             }
-            metrics.update({f'train_{k}' : v for k,v in train_lang_metrics.items()})
+            metrics.update({f'train_{k}': v for k, v in train_lang_metrics.items()})
 
-            for split in ['dev','test','ood','zeroshot'] :
-                loss,macro_f1,micro_f1,lang_metrics = evaluate(
-                    model,dataloaders[split],device,split
+            for split in ['dev', 'test', 'ood', 'zeroshot']:
+                loss, macro_f1, micro_f1, lang_metrics = evaluate(
+                    model, dataloaders[split], device, split
                 )
                 metrics.update({
-                    f'{split}_loss' : loss,
-                    f'{split}_macro_f1' : macro_f1,
-                    f'{split}_micro_f1' : micro_f1
+                    f'{split}_loss': loss,
+                    f'{split}_macro_f1': macro_f1,
+                    f'{split}_micro_f1': micro_f1
                 })
                 metrics.update(lang_metrics)
 
             wandb.log(metrics)
 
             # Save best model with process-specific name
-            if metrics['dev_macro_f1'] > best_dev_macro_f1 :
+            if metrics['dev_macro_f1'] > best_dev_macro_f1:
                 best_dev_macro_f1 = metrics['dev_macro_f1']
-                best_metrics = {f'best_{k}' : v for k,v in metrics.items()}
+                best_metrics = {f'best_{k}': v for k, v in metrics.items()}
 
-                model_path = os.path.join(wandb.run.dir,f'best_model_process{process_id}.pt')
+                model_path = os.path.join(wandb.run.dir, f'best_model_process{process_id}.pt')
                 torch.save({
-                    'model_state_dict' : model.state_dict(),
-                    'optimizer_state_dict' : optimizer.state_dict(),
-                    'scheduler_state_dict' : scheduler.state_dict(),
-                    'epoch' : epoch,
-                    'best_dev_macro_f1' : best_dev_macro_f1,
-                    'config' : config._items,
-                    'seed' : seed,
-                    'process_id' : process_id
-                },model_path)
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'epoch': epoch,
+                    'best_dev_macro_f1': best_dev_macro_f1,
+                    'config': config._items,
+                    'seed': seed,
+                    'process_id': process_id
+                }, model_path)
                 wandb.save(f'best_model_process{process_id}.pt')
 
         wandb.log(best_metrics)
 
-    except Exception as e :
+    except Exception as e:
         print(f"Error in process {process_id}: {str(e)}")
         raise e
 
-    finally :
-        # Cleanup
-        del model
-        del optimizer
-        del scheduler
+    finally:
+        # Safe cleanup
+        if 'model' in locals() and model is not None:
+            del model
+        if 'optimizer' in locals() and optimizer is not None:
+            del optimizer
+        if 'scheduler' in locals() and scheduler is not None:
+            del scheduler
         torch.cuda.empty_cache()
         wandb.finish()
 

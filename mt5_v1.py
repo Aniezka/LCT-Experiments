@@ -287,12 +287,12 @@ def main():
         'parameters': {
             'learning_rate': {
                 'distribution': 'log_uniform_values',
-                'min': 1e-6,  # Lowered minimum learning rate
-                'max': 1e-5   # Lowered maximum learning rate
+                'min': 1e-6,
+                'max': 1e-5
             },
             'weight_decay': {
                 'distribution': 'log_uniform_values',
-                'min': 1e-4,  # Adjusted weight decay range
+                'min': 1e-4,
                 'max': 1e-2
             },
             'batch_size': {
@@ -317,7 +317,7 @@ def main():
                 'values': ['linear', 'cosine', 'polynomial']
             },
             'gradient_clip_val': {
-                'values': [0.1, 0.5, 1.0]  # Added lower gradient clip value
+                'values': [0.1, 0.5, 1.0]
             },
             'label_smoothing': {
                 'values': [0.0, 0.1, 0.2]
@@ -349,68 +349,69 @@ def main():
         print(f"Created sweep with ID: {sweep_id}")
     else:
         sweep_id = args.sweep_id
-        
+
     def train():
-    # Initialize wandb
-    run = wandb.init()
-    config = wandb.config
-    
-    # Set random seed with time component
-    seed = int(time.time() * 1000) % (2**32 - 1)  # Ensure seed is within numpy's range
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    np.random.seed(seed)
-    random.seed(seed)
-    
-    # Log the seed
-    wandb.config.update({"random_seed": seed})
-    
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Using device: {device}")
-
-    # Load dataset
-    dataset = load_dataset("utahnlp/x-fact", "all_languages")
-    
-    # Initialize model and tokenizer
-    model_name = "google/mt5-base"
-    tokenizer = MT5Tokenizer.from_pretrained(model_name)
-    model = MT5ForSequenceClassification.from_pretrained(
-        model_name,
-        num_labels=7,
-        dropout_rate=config.dropout,
-        problem_type="single_label_classification"
-    )
-    
-    # Enable gradient checkpointing for memory efficiency
-    model.gradient_checkpointing_enable()
-    model = model.to(device)
-
-    # Create dataloaders with proper seeding
-    dataloaders = {}
-    for split_name, split_data in dataset.items():
-        dataset_obj = XFACTDataset(split_data, tokenizer, config)
-        batch_size = config.batch_size
-        shuffle = (split_name == 'train')
+        run = wandb.init()
+        config = wandb.config
         
-        if shuffle:
-            generator = torch.Generator()
-            generator.manual_seed(seed)
-            dataloaders[split_name] = DataLoader(
-                dataset_obj, 
-                batch_size=batch_size, 
-                shuffle=True,
-                generator=generator,
-                num_workers=0,  # Avoid multiprocessing issues
-                pin_memory=True  # Speed up data transfer to GPU
-            )
-        else:
-            dataloaders[split_name] = DataLoader(
-                dataset_obj, 
-                batch_size=batch_size, 
-                shuffle=False,
-                num_workers=0,
-                pin_memory=True
-            )
+        # Set random seed with time component
+        seed = int(time.time() * 1000) % (2**32 - 1)
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
+        # Log the seed
+        wandb.config.update({"random_seed": seed})
+        
+        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        print(f"Using device: {device}")
+
+        dataset = load_dataset("utahnlp/x-fact", "all_languages")
+        
+        train_languages = [item['language'] for item in dataset['train']]
+        language_counts = Counter(train_languages)
+        wandb.run.summary['dataset_language_distribution'] = language_counts
+
+        model_name = "google/mt5-base"
+        tokenizer = MT5Tokenizer.from_pretrained(model_name)
+        model = MT5ForSequenceClassification.from_pretrained(
+            model_name,
+            num_labels=7,
+            dropout_rate=config.dropout,
+            problem_type="single_label_classification"
+        )
+        
+        model.gradient_checkpointing_enable()
+        model = model.to(device)
+
+        dataloaders = {}
+        for split_name, split_data in dataset.items():
+            dataset_obj = XFACTDataset(split_data, tokenizer, config)
+            batch_size = config.batch_size
+            shuffle = (split_name == 'train')
+            
+            if shuffle:
+                generator = torch.Generator()
+                generator.manual_seed(seed)
+                dataloaders[split_name] = DataLoader(
+                    dataset_obj, 
+                    batch_size=batch_size, 
+                    shuffle=True,
+                    generator=generator,
+                    num_workers=0,
+                    pin_memory=True
+                )
+            else:
+                dataloaders[split_name] = DataLoader(
+                    dataset_obj, 
+                    batch_size=batch_size, 
+                    shuffle=False,
+                    num_workers=0,
+                    pin_memory=True
+                )
 
         optimizer = AdamW(
             model.parameters(),
@@ -430,12 +431,10 @@ def main():
         for epoch in range(config.epochs):
             print(f'\nEpoch {epoch + 1}/{config.epochs}')
             
-            # Training
             train_loss, train_macro_f1, train_micro_f1, train_lang_metrics = train_epoch(
                 model, dataloaders['train'], optimizer, scheduler, device, config
             )
             
-            # Evaluation
             metrics = {'epoch': epoch + 1}
             
             metrics.update({
@@ -445,7 +444,6 @@ def main():
             })
             metrics.update({f'train_{k}': v for k, v in train_lang_metrics.items()})
             
-            # Evaluate all splits
             for split in ['dev', 'test', 'ood', 'zeroshot']:
                 loss, macro_f1, micro_f1, lang_metrics = evaluate(
                     model, dataloaders[split], device, split
@@ -459,7 +457,6 @@ def main():
 
             wandb.log(metrics)
 
-            # Early stopping and model saving
             if metrics['dev_macro_f1'] > best_dev_macro_f1:
                 best_dev_macro_f1 = metrics['dev_macro_f1']
                 best_metrics = {f'best_{k}': v for k, v in metrics.items()}

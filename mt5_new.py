@@ -101,32 +101,32 @@ class XFACTDataset(torch.utils.data.Dataset):
         return len(self.data)
 
    def __getitem__(self, idx):
-    item = self.data[idx]
-    
-    # Use the format_input function instead of manual formatting
-    text = format_input(item, self.input_format)
-    
-    # Tokenize
-    encoding = self.tokenizer(
-        text,
-        max_length=self.max_length,
-        padding='max_length',
-        truncation=True,
-        return_tensors='pt'
-    )
-    
-    # Handle labels more robustly
-    label = item['label'].lower()
-    if label not in LABEL_MAP:
-        logger.warning(f"Unknown label encountered: {label}, defaulting to 'other'")
-        label = 'other'
-    
-    return {
-        'input_ids': encoding['input_ids'].squeeze(),
-        'attention_mask': encoding['attention_mask'].squeeze(),
-        'labels': torch.tensor(LABEL_MAP[label]),
-        'language': item['language']
-    }
+        item = self.data[idx]
+        
+        # Use the format_input function instead of manual formatting
+        text = format_input(item, self.input_format)
+        
+        # Tokenize
+        encoding = self.tokenizer(
+            text,
+            max_length=self.max_length,
+            padding='max_length',
+            truncation=True,
+            return_tensors='pt'
+        )
+        
+        # Handle labels more robustly
+        label = item['label'].lower()
+        if label not in LABEL_MAP:
+            logger.warning(f"Unknown label encountered: {label}, defaulting to 'other'")
+            label = 'other'
+        
+        return {
+            'input_ids': encoding['input_ids'].squeeze(),
+            'attention_mask': encoding['attention_mask'].squeeze(),
+            'labels': torch.tensor(LABEL_MAP[label]),
+            'language': item['language']
+        }
 def calculate_metrics(all_labels, all_preds):
     """Calculate both macro and micro F1 scores"""
     macro_f1 = f1_score(all_labels, all_preds, average='macro')

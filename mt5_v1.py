@@ -16,6 +16,8 @@ import gc
 from torch.multiprocessing import Process, set_start_method
 import signal
 import sys
+import time
+import random
 
 def calculate_metrics(all_labels, all_preds):
     """Calculate both macro and micro F1 scores"""
@@ -205,21 +207,24 @@ def get_scheduler(optimizer, num_training_steps, config):
 
 def train_epoch(model, train_loader, optimizer, scheduler, device, config):
     model.train()
-    total_loss = 0
+    total_loss = 0.0  # Initialize as float
     all_preds = []
     all_labels = []
     all_languages = []
     
-    # Initialize gradient scaler
+    # Initialize scaler for mixed precision
     scaler = torch.cuda.amp.GradScaler()
-    optimizer.zero_grad()
-
+    
     for batch_idx, batch in enumerate(tqdm(train_loader, desc='Training')):
         input_ids = batch['input_ids'].to(device)
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
         languages = batch['languages']
+
+        # Clear gradients
+        optimizer.zero_grad()
         
+        # Forward pass with mixed precision
         with torch.cuda.amp.autocast():
             outputs = model(
                 input_ids=input_ids,
@@ -228,9 +233,15 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, config):
             )
             loss = outputs.loss / config.accumulation_steps
 
-        # Scale the loss and backpropagate
-        scaler.scale(loss).backward()
+        # Check if loss is valid
+        if not torch.isfinite(loss):
+            print(f"Warning: non-finite loss encountered: {loss.item()}")
+            continue
 
+        # Backward pass with scaling
+        scaler.scale(loss).backward()
+        
+        # Collect predictions
         with torch.no_grad():
             preds = torch.argmax(outputs.logits, dim=1)
             all_preds.extend(preds.cpu().numpy())
@@ -240,19 +251,21 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, config):
         total_loss += loss.item() * config.accumulation_steps
 
         if (batch_idx + 1) % config.accumulation_steps == 0:
-            # Unscale gradients
+            # Clip gradients
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip_val)
-            # Update weights
+            
+            # Optimizer step with scaling
             scaler.step(optimizer)
             scaler.update()
             scheduler.step()
             optimizer.zero_grad()
 
+    avg_loss = total_loss / len(train_loader) if len(train_loader) > 0 else float('nan')
     macro_f1, micro_f1 = calculate_metrics(all_labels, all_preds)
     language_metrics = calculate_language_metrics(all_labels, all_preds, all_languages)
     
-    return total_loss / len(train_loader), macro_f1, micro_f1, language_metrics
+    return avg_loss, macro_f1, micro_f1, language_metrics
 
 def main():
     parser = argparse.ArgumentParser()
@@ -274,19 +287,19 @@ def main():
         'parameters': {
             'learning_rate': {
                 'distribution': 'log_uniform_values',
-                'min': 5e-6,
-                'max': 5e-5
+                'min': 1e-6,  # Lowered minimum learning rate
+                'max': 1e-5   # Lowered maximum learning rate
             },
             'weight_decay': {
                 'distribution': 'log_uniform_values',
-                'min': 1e-3,
-                'max': 5e-2
+                'min': 1e-4,  # Adjusted weight decay range
+                'max': 1e-2
             },
             'batch_size': {
                 'values': [2, 4, 6]
             },
             'adam_beta2': {
-                'values': [0.98, 0.99, 0.995, 0.999]
+                'values': [0.98, 0.99, 0.995]
             },
             'warmup_ratio': {
                 'values': [0.1, 0.15, 0.2]
@@ -304,7 +317,7 @@ def main():
                 'values': ['linear', 'cosine', 'polynomial']
             },
             'gradient_clip_val': {
-                'values': [0.5, 1.0, 2.0]
+                'values': [0.1, 0.5, 1.0]  # Added lower gradient clip value
             },
             'label_smoothing': {
                 'values': [0.0, 0.1, 0.2]
@@ -336,38 +349,68 @@ def main():
         print(f"Created sweep with ID: {sweep_id}")
     else:
         sweep_id = args.sweep_id
-      
+        
     def train():
-        run = wandb.init()
-        config = wandb.config
+    # Initialize wandb
+    run = wandb.init()
+    config = wandb.config
+    
+    # Set random seed with time component
+    seed = int(time.time() * 1000) % (2**32 - 1)  # Ensure seed is within numpy's range
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    np.random.seed(seed)
+    random.seed(seed)
+    
+    # Log the seed
+    wandb.config.update({"random_seed": seed})
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
+
+    # Load dataset
+    dataset = load_dataset("utahnlp/x-fact", "all_languages")
+    
+    # Initialize model and tokenizer
+    model_name = "google/mt5-base"
+    tokenizer = MT5Tokenizer.from_pretrained(model_name)
+    model = MT5ForSequenceClassification.from_pretrained(
+        model_name,
+        num_labels=7,
+        dropout_rate=config.dropout,
+        problem_type="single_label_classification"
+    )
+    
+    # Enable gradient checkpointing for memory efficiency
+    model.gradient_checkpointing_enable()
+    model = model.to(device)
+
+    # Create dataloaders with proper seeding
+    dataloaders = {}
+    for split_name, split_data in dataset.items():
+        dataset_obj = XFACTDataset(split_data, tokenizer, config)
+        batch_size = config.batch_size
+        shuffle = (split_name == 'train')
         
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        print(f"Using device: {device}")
-
-        dataset = load_dataset("utahnlp/x-fact", "all_languages")
-        
-        train_languages = [item['language'] for item in dataset['train']]
-        language_counts = Counter(train_languages)
-        wandb.run.summary['dataset_language_distribution'] = language_counts
-
-        model_name = "google/mt5-base"
-        tokenizer = MT5Tokenizer.from_pretrained(model_name)
-        model = MT5ForSequenceClassification.from_pretrained(
-            model_name,
-            num_labels=7,
-            dropout_rate=config.dropout,
-            problem_type="single_label_classification"
-        ).to(device)
-
-        # Enable gradient checkpointing
-        model.gradient_checkpointing_enable()
-
-        dataloaders = {}
-        for split_name, split_data in dataset.items():
-            dataset_obj = XFACTDataset(split_data, tokenizer, config)
-            batch_size = config.batch_size
-            shuffle = (split_name == 'train')
-            dataloaders[split_name] = DataLoader(dataset_obj, batch_size=batch_size, shuffle=shuffle)
+        if shuffle:
+            generator = torch.Generator()
+            generator.manual_seed(seed)
+            dataloaders[split_name] = DataLoader(
+                dataset_obj, 
+                batch_size=batch_size, 
+                shuffle=True,
+                generator=generator,
+                num_workers=0,  # Avoid multiprocessing issues
+                pin_memory=True  # Speed up data transfer to GPU
+            )
+        else:
+            dataloaders[split_name] = DataLoader(
+                dataset_obj, 
+                batch_size=batch_size, 
+                shuffle=False,
+                num_workers=0,
+                pin_memory=True
+            )
 
         optimizer = AdamW(
             model.parameters(),

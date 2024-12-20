@@ -193,7 +193,7 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, confi
             )
 
             loss = outputs.loss / config.accumulation_steps
-            scaler.scale(loss).backward()  # Use scaler for backward pass
+            scaler.scale(loss).backward()
 
         with torch.no_grad():
             preds = torch.argmax(outputs.logits, dim=1)
@@ -204,10 +204,10 @@ def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, confi
         total_loss += loss.item() * config.accumulation_steps
 
         if (batch_idx + 1) % config.accumulation_steps == 0:
-            scaler.unscale_(optimizer)  # Unscale gradients
+            scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip_val)
-            scaler.step(optimizer)  # Use scaler for optimizer step
-            scaler.update()  # Update scaler
+            scaler.step(optimizer)
+            scaler.update()
             scheduler.step()
             optimizer.zero_grad(set_to_none=True)
 
@@ -248,15 +248,14 @@ def train():
     language_counts = Counter(train_languages)
     wandb.run.summary['dataset_language_distribution'] = language_counts
     
-    # Initialize MT0-base model and tokenizer
     model_name = "bigscience/mt0-small"
-    tokenizer = MT5TokenizerFast.from_pretrained(model_name)  # This line was missing
+    tokenizer = MT5TokenizerFast.from_pretrained(model_name)
     model = MT5ForSequenceClassification.from_pretrained(
             model_name,
             num_labels=7,
             dropout_rate=config.dropout,
-            use_cache=False  # Required for gradient checkpointing
-    ).to(device)  # .to(device) was missing
+            use_cache=False
+    ).to(device)
     model.gradient_checkpointing_enable()
 
     dataloaders = {}
@@ -266,7 +265,6 @@ def train():
         shuffle = (split_name == 'train')
         dataloaders[split_name] = DataLoader(dataset_obj, batch_size=batch_size, shuffle=shuffle)
 
-    # Freeze layers if specified
     if config.frozen_layers > 0:
         for i in range(config.frozen_layers):
             for param in model.encoder.block[i].parameters():
@@ -285,16 +283,14 @@ def train():
 
     best_dev_macro_f1 = 0
     best_metrics = {}
-    patience_counter = 0
 
     for epoch in range(config.epochs):
         print(f'\nEpoch {epoch + 1}/{config.epochs}')
         
         train_loss, train_macro_f1, train_micro_f1, train_lang_metrics = train_epoch(
-            model, dataloaders['train'], optimizer, scheduler, scaler, device, config  # Added scaler here
+            model, dataloaders['train'], optimizer, scheduler, scaler, device, config
         )
         
-        # Evaluation
         metrics = {'epoch': epoch + 1}
         
         metrics.update({
@@ -304,7 +300,6 @@ def train():
         })
         metrics.update({f'train_{k}': v for k, v in train_lang_metrics.items()})
         
-        # Evaluate all splits
         for split in ['dev', 'test', 'ood', 'zeroshot']:
             loss, macro_f1, micro_f1, lang_metrics = evaluate(
                 model, dataloaders[split], device, split
@@ -318,20 +313,14 @@ def train():
 
         wandb.log(metrics)
 
-        # Early stopping and model saving
+        # Save best model based on dev macro F1
         if metrics['dev_macro_f1'] > best_dev_macro_f1:
             best_dev_macro_f1 = metrics['dev_macro_f1']
             best_metrics = {f'best_{k}': v for k, v in metrics.items()}
-            patience_counter = 0
             
             model_path = os.path.join(wandb.run.dir, 'best_model.pt')
             torch.save(model.state_dict(), model_path)
             wandb.save('best_model.pt')
-        else:
-            patience_counter += 1
-            if patience_counter >= config.patience:
-                print(f"Early stopping at epoch {epoch + 1}")
-                break
 
     wandb.log(best_metrics)
  
@@ -340,9 +329,7 @@ def main():
     parser.add_argument('--sweep_id', type=str, required=True, help='W&B sweep ID')
     args = parser.parse_args()
 
-    # No need to set CUDA_VISIBLE_DEVICES as it's handled by Condor
-    
-    WANDB_PROJECT = "xlmr-search" 
+    WANDB_PROJECT = "mt0-search" 
     WANDB_ENTITY = "aniezka"       
     
     sweep_configuration = {
@@ -355,7 +342,7 @@ def main():
             'learning_rate': {
                 'distribution': 'log_uniform_values',
                 'min': 1e-5,
-                'max': 1e-4
+                'max': 3e-4
             },
             'weight_decay': {
                 'distribution': 'log_uniform_values',
@@ -363,31 +350,28 @@ def main():
                 'max': 1e-2
             },
             'batch_size': {
-                'values': [2, 4, 8]  # Slightly larger batch sizes possible with smaller model
+                'values': [4, 8, 16]
             },
             'adam_beta2': {
-                'values': [0.98, 0.99]
+                'values': [0.98, 0.99, 0.999]
             },
             'warmup_ratio': {
-                'value': 0.1
+                'values': [0.05, 0.1, 0.15]
             },
             'adam_beta1': {
                 'value': 0.9
             },
             'max_length': {
-                'value': 256  # Reduced sequence length to save memory
-            },
-            'patience': {
-                'value': 3
+                'value': 256
             },
             'scheduler_type': {
-                'value': 'linear'
+                'values': ['linear', 'cosine']
             },
             'gradient_clip_val': {
                 'value': 1.0
             },
             'label_smoothing': {
-                'value': 0.0
+                'values': [0.0, 0.1]
             },
             'dropout': {
                 'value': 0.1
@@ -405,7 +389,7 @@ def main():
                 'value': 1e-8
             },
             'epochs': {
-                'value': 10
+                'values': [10, 15]
             }
         }
     }
@@ -420,6 +404,7 @@ def main():
     else:
         sweep_id = args.sweep_id
 
+    # Each agent will run 20 trials
     wandb.agent(
         sweep_id,
         function=train,
@@ -428,8 +413,5 @@ def main():
         entity=WANDB_ENTITY
     )
 
-        
 if __name__ == "__main__":
     main()
-
-    

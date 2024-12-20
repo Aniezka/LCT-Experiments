@@ -341,22 +341,28 @@ def main():
         'parameters': {
             'learning_rate': {
                 'distribution': 'log_uniform_values',
-                'min': 1e-5,
-                'max': 3e-4
+                'min': 1e-6,  # Lower minimum learning rate
+                'max': 1e-5   # Lower maximum learning rate
             },
             'weight_decay': {
                 'distribution': 'log_uniform_values',
-                'min': 1e-4,
-                'max': 1e-2
+                'min': 1e-5,
+                'max': 1e-3
             },
             'batch_size': {
-                'values': [4, 8, 16]
+                'values': [2, 4]  # Smaller batch sizes due to model size
+            },
+            'gradient_clip_val': {
+                'values': [0.1, 0.5]  # Lower gradient clipping values
             },
             'adam_beta2': {
-                'values': [0.98, 0.99, 0.999]
+                'values': [0.98, 0.99]
             },
             'warmup_ratio': {
-                'values': [0.05, 0.1, 0.15]
+                'values': [0.05, 0.1]  # Adjusted warmup ratios
+            },
+            'accumulation_steps': {
+                'values': [16, 32]  # Increased accumulation steps
             },
             'adam_beta1': {
                 'value': 0.9
@@ -365,13 +371,10 @@ def main():
                 'value': 256
             },
             'scheduler_type': {
-                'values': ['linear', 'cosine']
-            },
-            'gradient_clip_val': {
-                'value': 1.0
+                'value': 'linear'
             },
             'label_smoothing': {
-                'values': [0.0, 0.1]
+                'value': 0.1
             },
             'dropout': {
                 'value': 0.1
@@ -382,14 +385,11 @@ def main():
             'input_format': {
                 'value': 'language_first'
             },
-            'accumulation_steps': {
-                'values': [4, 8]
-            },
             'adam_epsilon': {
                 'value': 1e-8
             },
             'epochs': {
-                'values': [10, 15]
+                'value': 10
             }
         }
     }
@@ -404,7 +404,6 @@ def main():
     else:
         sweep_id = args.sweep_id
 
-    # Each agent will run 20 trials
     wandb.agent(
         sweep_id,
         function=train,

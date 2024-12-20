@@ -315,9 +315,9 @@ def get_scheduler(optimizer,num_training_steps,config) :
         )
 
 
-def train() :
+def train():
     # Initialize wandb with unique run_id and capture the process ID
-    process_id = os.environ.get('PROCESS','0')
+    process_id = os.environ.get('PROCESS', '0')
     run_id = wandb.util.generate_id()
 
     run = wandb.init(
@@ -328,12 +328,12 @@ def train() :
     )
     config = wandb.config
 
-    # Generate a unique seed combining process_id and run_id
-    base_seed = int(run_id.split('-')[0],16) % (2 ** 32 - 1)
+    # Generate a unique seed from run_id using hash
+    base_seed = abs(hash(run_id)) % (2**32 - 1)
     process_offset = int(process_id) * 10000  # Ensure different seed ranges for each process
-    seed = (base_seed + process_offset) % (2 ** 32 - 1)
+    seed = (base_seed + process_offset) % (2**32 - 1)
     set_seed(seed)
-
+    
     # Use the GPU assigned by Condor via CUDA_VISIBLE_DEVICES
     if not torch.cuda.is_available() :
         raise RuntimeError("No CUDA device available. Check CUDA_VISIBLE_DEVICES setting.")

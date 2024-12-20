@@ -284,7 +284,7 @@ def train():
     model.gradient_checkpointing_enable()
 
     dataloaders = {}
-    for split_name, split_data in dataset.items():
+    for split_name, split_data in Dataset.items():
         dataset_obj = XFACTDataset(split_data, tokenizer, config)
         batch_size = config.batch_size
         shuffle = (split_name == 'train')

@@ -483,90 +483,90 @@ def train() :
         wandb.finish()
 
 
-def main() :
+def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--sweep_id',type=str,required=True)
+    parser.add_argument('--sweep_id', type=str, required=True)
     args = parser.parse_args()
 
-    WANDB_PROJECT = "mt0-search"
+    WANDB_PROJECT = "mt0-search" 
     WANDB_ENTITY = "aniezka"
-
+    
     sweep_configuration = {
-        'method' : 'bayes',
-        'metric' : {
-            'name' : 'dev_macro_f1',
-            'goal' : 'maximize'
+        'method': 'bayes',
+        'metric': {
+            'name': 'dev_macro_f1',
+            'goal': 'maximize'
         },
-        'parameters' : {
-            'learning_rate' : {
-                'distribution' : 'log_uniform_values',
-                'min' : 5e-7,
-                'max' : 1e-6
+        'parameters': {
+            'learning_rate': {
+                'distribution': 'log_uniform_values',
+                'min': 5e-7,
+                'max': 1e-6
             },
-            'weight_decay' : {
-                'distribution' : 'log_uniform_values',
-                'min' : 1e-4,
-                'max' : 1e-2
+            'weight_decay': {
+                'distribution': 'log_uniform_values',
+                'min': 1e-4,
+                'max': 1e-2
             },
-            'batch_size' : {
-                'value' : 2
+            'batch_size': {
+                'value': 2
             },
-            'gradient_clip_val' : {
-                'value' : 0.1
+            'gradient_clip_val': {
+                'value': 0.1
             },
-            'adam_beta2' : {
-                'value' : 0.999
+            'adam_beta2': {
+                'value': 0.999
             },
-            'warmup_ratio' : {
-                'value' : 0.1
+            'warmup_ratio': {
+                'value': 0.1
             },
-            'accumulation_steps' : {
-                'value' : 8
+            'accumulation_steps': {
+                'value': 8
             },
-            'adam_beta1' : {
-                'value' : 0.9
+            'adam_beta1': {
+                'value': 0.9
             },
-            'max_length' : {
-                'value' : 128
+            'max_length': {
+                'value': 128
             },
-            'scheduler_type' : {
-                'value' : 'linear'
+            'scheduler_type': {
+                'value': 'linear'
             },
-            'label_smoothing' : {
-                'value' : 0.05
+            'label_smoothing': {
+                'value': 0.05
             },
-            'dropout' : {
-                'value' : 0.2
+            'dropout': {
+                'value': 0.2
             },
-            'frozen_layers' : {
-                'value' : 2
+            'frozen_layers': {
+                'value': 2
             },
-            'input_format' : {
-                'value' : 'language_first'
+            'input_format': {
+                'value': 'language_first'
             },
-            'adam_epsilon' : {
-                'value' : 1e-8
+            'adam_epsilon': {
+                'value': 1e-8
             },
-            'epochs' : {
-                'value' : 10
+            'epochs': {
+                'value': 10
             }
         }
     }
 
-    if args.sweep_id.lower() == "none" :
+    if args.sweep_id.lower() == "none":
         sweep_id = wandb.sweep(
             sweep_configuration,
             project=WANDB_PROJECT,
             entity=WANDB_ENTITY
         )
         print(f"Created sweep with ID: {sweep_id}")
-
+        
         sweep_id_file = "/scratch/hshcharbakova/LCT-Experiments/current_sweep_id.txt"
-        with open(sweep_id_file,'w') as f :
+        with open(sweep_id_file, 'w') as f:
             f.write(sweep_id)
-    else :
+    else:
         sweep_id = args.sweep_id
-
+    
     wandb.agent(
         sweep_id,
         function=train,

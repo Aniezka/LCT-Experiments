@@ -120,19 +120,32 @@ class XFACTDataset(Dataset):
         item = self.data[idx]
         text = format_input(item, self.input_format)
 
+        # Use decoder_input_ids=True for MT5
         encoding = self.tokenizer(
             text,
-            max_length=self.max_length,
+            max_length=self.max_length - 1,  # Leave room for EOS token
             padding='max_length',
             truncation=True,
-            return_tensors='pt'
+            return_attention_mask=True,
+            add_special_tokens=False,  # We'll add EOS manually
+            return_tensors=None,  # Return Python lists
         )
 
+        # Add EOS token
+        input_ids = encoding['input_ids'] + [self.tokenizer.eos_token_id]
+        attention_mask = encoding['attention_mask'] + [1]  # 1 for attention on EOS token
+
+        # Pad if needed
+        if len(input_ids) < self.max_length:
+            padding_length = self.max_length - len(input_ids)
+            input_ids = input_ids + ([self.tokenizer.pad_token_id] * padding_length)
+            attention_mask = attention_mask + ([0] * padding_length)
+
         label = self.label_map.get(item['label'].lower(), 6)
-      
+        
         return {
-            'input_ids': encoding['input_ids'].squeeze(),
-            'attention_mask': encoding['attention_mask'].squeeze(),
+            'input_ids': torch.tensor(input_ids),
+            'attention_mask': torch.tensor(attention_mask),
             'labels': torch.tensor(label),
             'languages': item['language']
         }

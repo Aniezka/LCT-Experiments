@@ -249,7 +249,7 @@ def train():
     wandb.run.summary['dataset_language_distribution'] = language_counts
     
     # Initialize MT0-base model and tokenizer
-    model_name = "bigscience/mt0-base"
+    model_name = "bigscience/mt0-small"
     tokenizer = MT5TokenizerFast.from_pretrained(model_name)  # This line was missing
     model = MT5ForSequenceClassification.from_pretrained(
             model_name,
@@ -334,7 +334,7 @@ def train():
                 break
 
     wandb.log(best_metrics)
-
+ 
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--gpu_id', type=int, required=True, help='GPU ID to use')
@@ -343,7 +343,7 @@ def main():
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
 
-    WANDB_PROJECT = "xlmr-search" 
+    WANDB_PROJECT = "mt0-search" 
     WANDB_ENTITY = "aniezka"       
     
     sweep_configuration = {

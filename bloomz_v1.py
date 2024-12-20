@@ -1,136 +1,124 @@
 import torch
-from transformers import MT5TokenizerFast,MT5ForSequenceClassification
-from transformers import get_linear_schedule_with_warmup,get_cosine_schedule_with_warmup, \
-    get_polynomial_decay_schedule_with_warmup
-from torch.optim import AdamW
-from torch.utils.data import Dataset,DataLoader
+from transformers import MT5TokenizerFast, MT5ForSequenceClassification
+from transformers import get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup, get_polynomial_decay_schedule_with_warmup
+from torch.optim import AdamW 
+from torch.utils.data import Dataset, DataLoader
+import numpy as np
 from sklearn.metrics import f1_score
 from tqdm import tqdm
 import wandb
 from datasets import load_dataset
+from multiprocessing import Process, cpu_count
 import argparse
 import os
 from collections import Counter
-import random
-import numpy as np
+import gc
+from torch.multiprocessing import Process, set_start_method
+import signal
+import sys
 
-
-def set_seed(seed) :
-    """Set all random seeds and CUDA settings"""
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available() :
-        torch.cuda.manual_seed_all(seed)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-
-def calculate_metrics(all_labels,all_preds) :
+def calculate_metrics(all_labels, all_preds):
     """Calculate both macro and micro F1 scores"""
-    macro_f1 = f1_score(all_labels,all_preds,average='macro')
-    micro_f1 = f1_score(all_labels,all_preds,average='micro')
-    return macro_f1,micro_f1
+    macro_f1 = f1_score(all_labels, all_preds, average='macro')
+    micro_f1 = f1_score(all_labels, all_preds, average='micro')
+    return macro_f1, micro_f1
 
-
-def calculate_language_metrics(labels,preds,languages) :
+def calculate_language_metrics(labels, preds, languages):
     """Calculate F1 scores for each language"""
     language_metrics = {}
     unique_languages = set(languages)
-
-    for lang in unique_languages :
-        lang_mask = [i for i,l in enumerate(languages) if l == lang]
-        if lang_mask :
+    
+    for lang in unique_languages:
+        lang_mask = [i for i, l in enumerate(languages) if l == lang]
+        if lang_mask:
             lang_labels = [labels[i] for i in lang_mask]
             lang_preds = [preds[i] for i in lang_mask]
-
-            macro_f1 = f1_score(lang_labels,lang_preds,average='macro')
-            micro_f1 = f1_score(lang_labels,lang_preds,average='micro')
-
+            
+            macro_f1 = f1_score(lang_labels, lang_preds, average='macro')
+            micro_f1 = f1_score(lang_labels, lang_preds, average='micro')
+            
             language_metrics[f'{lang}_macro_f1'] = macro_f1
             language_metrics[f'{lang}_micro_f1'] = micro_f1
             language_metrics[f'{lang}_sample_count'] = len(lang_mask)
-
+            
     return language_metrics
 
-
-def format_input(item,format_type='language_first') :
+def format_input(item, format_type='language_first'):
     """Format input text according to specified template"""
     components = {
-        'language' : f"language: {item['language']}",
-        'site' : f"site: {item['site']}",
-        'claim' : f"claim: {item['claim']}",
-        'evidence' : "",
-        'claimant' : f"claimant: {item.get('claimant','')}",
-        'claimDate' : f"claimDate: {item.get('claimDate','')}",
-        'reviewDate' : f"reviewDate: {item.get('reviewDate','')}"
+        'language': f"language: {item['language']}",
+        'site': f"site: {item['site']}",
+        'claim': f"claim: {item['claim']}",
+        'evidence': "",
+        'claimant': f"claimant: {item.get('claimant', '')}",
+        'claimDate': f"claimDate: {item.get('claimDate', '')}",
+        'reviewDate': f"reviewDate: {item.get('reviewDate', '')}"
     }
-
+    
     # Filter out empty components
-    filtered_components = {k : v for k,v in components.items()
-                           if v and not v.endswith(": ")}
-
-    for i in range(1,6) :
+    filtered_components = {k: v for k, v in components.items() 
+                         if v and not v.endswith(": ")}
+    
+    for i in range(1, 6):
         ev_key = f'evidence_{i}'
-        if ev_key in item and item[ev_key] :
+        if ev_key in item and item[ev_key]:
             components['evidence'] += f"evidence_{i}: {item[ev_key]} "
-
+    
     # Different ordering based on format_type
-    if format_type == 'language_first' :
+    if format_type == 'language_first':
         text = f"{filtered_components['language']} {filtered_components['site']} "
-        if 'claimant' in filtered_components :
+        if 'claimant' in filtered_components:
             text += f"{filtered_components['claimant']} "
-        if 'claimDate' in filtered_components :
+        if 'claimDate' in filtered_components:
             text += f"{filtered_components['claimDate']} "
-        if 'reviewDate' in filtered_components :
+        if 'reviewDate' in filtered_components:
             text += f"{filtered_components['reviewDate']} "
         text += f"{filtered_components['claim']} {components['evidence']}"
-    elif format_type == 'claim_first' :
+    elif format_type == 'claim_first':
         text = f"{filtered_components['claim']} "
-        if 'claimant' in filtered_components :
+        if 'claimant' in filtered_components:
             text += f"{filtered_components['claimant']} "
-        if 'claimDate' in filtered_components :
+        if 'claimDate' in filtered_components:
             text += f"{filtered_components['claimDate']} "
-        if 'reviewDate' in filtered_components :
+        if 'reviewDate' in filtered_components:
             text += f"{filtered_components['reviewDate']} "
         text += f"{filtered_components['language']} {filtered_components['site']} {components['evidence']}"
-    else :  # evidence_first
+    else:  # evidence_first
         text = f"{components['evidence']}"
         text += f"{filtered_components['language']} {filtered_components['site']} "
-        if 'claimant' in filtered_components :
+        if 'claimant' in filtered_components:
             text += f"{filtered_components['claimant']} "
-        if 'claimDate' in filtered_components :
+        if 'claimDate' in filtered_components:
             text += f"{filtered_components['claimDate']} "
-        if 'reviewDate' in filtered_components :
+        if 'reviewDate' in filtered_components:
             text += f"{filtered_components['reviewDate']} "
         text += filtered_components['claim']
-
+    
     return text.strip()
 
-
-class XFACTDataset(Dataset) :
-    def __init__(self,data,tokenizer,config) :
+class XFACTDataset(Dataset):
+    def __init__(self, data, tokenizer, config):
         self.data = data
         self.tokenizer = tokenizer
         self.max_length = config.max_length
         self.input_format = config.input_format
 
         self.label_map = {
-            'false' : 0,
-            'mostly_false' : 1,
-            'partly_true' : 2,
-            'mostly_true' : 3,
-            'true' : 4,
-            'unverifiable' : 5,
-            'other' : 6
+            'false': 0,
+            'mostly_false': 1,
+            'partly_true': 2,
+            'mostly_true': 3,
+            'true': 4,
+            'unverifiable': 5,
+            'other': 6
         }
 
-    def __len__(self) :
+    def __len__(self):
         return len(self.data)
 
-    def __getitem__(self,idx) :
+    def __getitem__(self, idx):
         item = self.data[idx]
-        text = format_input(item,self.input_format)
+        text = format_input(item, self.input_format)
 
         encoding = self.tokenizer(
             text,
@@ -140,459 +128,316 @@ class XFACTDataset(Dataset) :
             return_tensors='pt'
         )
 
-        label = self.label_map.get(item['label'].lower(),6)
+        label = self.label_map.get(item['label'].lower(), 6)
         return {
-            'input_ids' : encoding['input_ids'].squeeze(),
-            'attention_mask' : encoding['attention_mask'].squeeze(),
-            'labels' : torch.tensor(label),
-            'languages' : item['language']
+            'input_ids': encoding['input_ids'].squeeze(),
+            'attention_mask': encoding['attention_mask'].squeeze(),
+            'labels': torch.tensor(label),
+            'languages': item['language']
         }
 
-def evaluate(model,eval_loader,device,split_name="eval") :
+def evaluate(model, eval_loader, device, split_name="eval"):
     model.eval()
     total_loss = 0
     all_preds = []
     all_labels = []
     all_languages = []
 
-    with torch.no_grad() :
-        for batch in tqdm(eval_loader,desc=f'Evaluating {split_name}') :
+    with torch.no_grad():
+        for batch in tqdm(eval_loader, desc=f'Evaluating {split_name}'):
             input_ids = batch['input_ids'].to(device)
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
             languages = batch['languages']
-
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
-
-            total_loss += outputs.loss.item()
-            preds = torch.argmax(outputs.logits,dim=1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            all_languages.extend(languages)
-
-    macro_f1,micro_f1 = calculate_metrics(all_labels,all_preds)
-    language_metrics = calculate_language_metrics(all_labels,all_preds,all_languages)
-
-    prefixed_language_metrics = {
-        f'{split_name}_{k}' : v for k,v in language_metrics.items()
-    }
-
-    return total_loss / len(eval_loader),macro_f1,micro_f1,prefixed_language_metrics
-
-
-def check_grads(model,loss_value,batch_idx) :
-    """Monitor gradient values and loss for debugging"""
-    if loss_value is None or torch.isnan(loss_value) or torch.isinf(loss_value) :
-        print(f"Batch {batch_idx}: Invalid loss value: {loss_value}")
-        return False,0,0
-
-    grad_norm = 0
-    max_grad = 0
-    for p in model.parameters() :
-        if p.grad is not None :
-            grad_norm += p.grad.data.norm(2).item() ** 2
-            max_grad = max(max_grad,p.grad.data.abs().max().item())
-    grad_norm = grad_norm ** 0.5
-
-    if grad_norm > 100 or max_grad > 100 :  # Gradient explosion check
-        print(f"Batch {batch_idx}: Large gradients - Grad norm: {grad_norm}, Max grad: {max_grad}")
-        return False,grad_norm,max_grad
-
-    return True,grad_norm,max_grad
-
-
-def train_epoch(model,train_loader,optimizer,scheduler,scaler,device,config) :
-    model.train()
-    total_loss = 0
-    all_preds = []
-    all_labels = []
-    all_languages = []
-    optimizer.zero_grad(set_to_none=True)
-
-    nan_counter = 0
-    max_nan_tolerance = 3
-
-    for batch_idx,batch in enumerate(tqdm(train_loader,desc='Training')) :
-        try :
-            input_ids = batch['input_ids'].to(device)
-            attention_mask = batch['attention_mask'].to(device)
-            labels = batch['labels'].to(device)
-            languages = batch['languages']
-
-            if torch.isnan(input_ids).any() or torch.isnan(attention_mask).any() :
-                print(f"NaN found in inputs at batch {batch_idx}")
-                continue
-
-            with torch.cuda.amp.autocast() :
+            with torch.cuda.amp.autocast():
                 outputs = model(
                     input_ids=input_ids,
                     attention_mask=attention_mask,
                     labels=labels
                 )
+
+                total_loss += outputs.loss.item()
+                preds = torch.argmax(outputs.logits, dim=1)
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+                all_languages.extend(languages)
+
+    macro_f1, micro_f1 = calculate_metrics(all_labels, all_preds)
+    language_metrics = calculate_language_metrics(all_labels, all_preds, all_languages)
+    
+    prefixed_language_metrics = {
+        f'{split_name}_{k}': v for k, v in language_metrics.items()
+    }
+    
+    return total_loss / len(eval_loader), macro_f1, micro_f1, prefixed_language_metrics
+
+def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, config):
+    model.train()
+    total_loss = 0
+    all_preds = []
+    all_labels = []
+    all_languages = []
+    optimizer.zero_grad(set_to_none=True)  # More efficient zero_grad
+
+    for batch_idx, batch in enumerate(tqdm(train_loader, desc='Training')):
+        input_ids = batch['input_ids'].to(device)
+        attention_mask = batch['attention_mask'].to(device)
+        labels = batch['labels'].to(device)
+        languages = batch['languages']
+        
+        # Clear gradients at the start of each batch
+        if batch_idx % config.accumulation_steps == 0:
+            optimizer.zero_grad(set_to_none=True)
+        
+        try:
+            with torch.cuda.amp.autocast():
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels
+                )
+
                 loss = outputs.loss / config.accumulation_steps
-
-            if torch.isnan(loss) or torch.isinf(loss) :
-                print(f"NaN/Inf loss at batch {batch_idx}: {loss.item()}")
-                nan_counter += 1
-                if nan_counter >= max_nan_tolerance :
-                    raise RuntimeError(f"Hit {max_nan_tolerance} NaN losses in a row")
-                continue
-
-            scaler.scale(loss).backward()
-
-            if (batch_idx + 1) % config.accumulation_steps == 0 :
-                scaler.unscale_(optimizer)
-
-                valid_grads,grad_norm,max_grad = check_grads(
-                    model,loss,batch_idx
-                )
-
-                if not valid_grads :
-                    optimizer.zero_grad(set_to_none=True)
+                
+                # Check for NaN loss
+                if torch.isnan(loss):
+                    print(f"NaN loss detected in batch {batch_idx}")
                     continue
+                
+                scaler.scale(loss).backward()
 
-                torch.nn.utils.clip_grad_norm_(
-                    model.parameters(),
-                    config.gradient_clip_val
-                )
-
-                scaler.step(optimizer)
-                scaler.update()
-                scheduler.step()
-                optimizer.zero_grad(set_to_none=True)
-
-                if batch_idx % 50 == 0 :
-                    print(f"Batch {batch_idx}")
-                    print(f"Loss: {loss.item():.4f}")
-                    print(f"Grad norm: {grad_norm:.4f}")
-                    print(f"Max grad: {max_grad:.4f}")
-                    print(f"Learning rate: {optimizer.param_groups[0]['lr']:.2e}")
-
-            with torch.no_grad() :
-                logits = outputs.logits.float()
-                preds = torch.argmax(logits,dim=1)
+            # Collect predictions only if loss is valid
+            with torch.no_grad():
+                preds = torch.argmax(outputs.logits, dim=1)
                 all_preds.extend(preds.cpu().numpy())
                 all_labels.extend(labels.cpu().numpy())
                 all_languages.extend(languages)
 
             total_loss += loss.item() * config.accumulation_steps
 
-        except RuntimeError as e :
-            if "out of memory" in str(e) :
-                print(f"OOM error in batch {batch_idx}. Clearing memory...")
-                torch.cuda.empty_cache()
+            if (batch_idx + 1) % config.accumulation_steps == 0:
+                # Clip gradients before optimizer step
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip_val)
+                
+                # Step optimizer and scaler
+                scaler.step(optimizer)
+                scaler.update()
+                scheduler.step()
+                
+                # Zero gradients after optimizer step
                 optimizer.zero_grad(set_to_none=True)
-                continue
-            raise e
+                
+        except RuntimeError as e:
+            print(f"Error in batch {batch_idx}: {str(e)}")
+            continue
 
-    if len(all_preds) == 0 :
-        raise RuntimeError("No valid predictions in epoch")
+    if len(all_labels) > 0:  # Only calculate metrics if we have valid predictions
+        macro_f1, micro_f1 = calculate_metrics(all_labels, all_preds)
+        language_metrics = calculate_language_metrics(all_labels, all_preds, all_languages)
+        return total_loss / len(train_loader), macro_f1, micro_f1, language_metrics
+    else:
+        return float('nan'), 0, 0, {}
 
-    macro_f1,micro_f1 = calculate_metrics(all_labels,all_preds)
-    language_metrics = calculate_language_metrics(all_labels,all_preds,all_languages)
-
-    return total_loss / len(train_loader),macro_f1,micro_f1,language_metrics
-
-
-def get_scheduler(optimizer,num_training_steps,config) :
+def get_scheduler(optimizer, num_training_steps, config):
+    """Get scheduler based on config"""
     num_warmup_steps = int(num_training_steps * config.warmup_ratio)
-
-    if config.scheduler_type == 'linear' :
+    
+    if config.scheduler_type == 'linear':
         return get_linear_schedule_with_warmup(
-            optimizer,num_warmup_steps,num_training_steps
+            optimizer, num_warmup_steps, num_training_steps
         )
-    elif config.scheduler_type == 'cosine' :
+    elif config.scheduler_type == 'cosine':
         return get_cosine_schedule_with_warmup(
-            optimizer,num_warmup_steps,num_training_steps
+            optimizer, num_warmup_steps, num_training_steps
         )
-    else :  # polynomial
+    else:  # polynomial
         return get_polynomial_decay_schedule_with_warmup(
-            optimizer,num_warmup_steps,num_training_steps
+            optimizer, num_warmup_steps, num_training_steps
         )
-
 
 def train():
-    # Initialize wandb with unique run_id and capture the process ID
-    process_id = os.environ.get('PROCESS', '0')
-    run_id = wandb.util.generate_id()
-
-    run = wandb.init(
-        id=run_id,
-        reinit=True,
-        settings=wandb.Settings(start_method="thread"),
-        tags=[f"process_{process_id}"]  # Tag runs with their process ID
-    )
+    run = wandb.init()
     config = wandb.config
 
-    # Generate a unique seed from run_id using hash
-    base_seed = abs(hash(run_id)) % (2**32 - 1)
-    process_offset = int(process_id) * 10000  # Ensure different seed ranges for each process
-    seed = (base_seed + process_offset) % (2**32 - 1)
-    set_seed(seed)
+    # Initialize mixed precision scaler with more conservative growth
+    scaler = torch.cuda.amp.GradScaler(
+        init_scale=2**10,  # Start with a smaller scale
+        growth_factor=1.5,  # More conservative growth
+        backoff_factor=0.5,
+        growth_interval=100  # Increase scale less frequently
+    )
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Using device: {device}")
 
-    # Use the GPU assigned by Condor via CUDA_VISIBLE_DEVICES
-    if not torch.cuda.is_available():
-        raise RuntimeError("No CUDA device available. Check CUDA_VISIBLE_DEVICES setting.")
+    # Load model with float32 initialization for better stability
+    model_name = "bigscience/mt0-small"
+    tokenizer = MT5TokenizerFast.from_pretrained(model_name)
+    model = MT5ForSequenceClassification.from_pretrained(
+        model_name,
+        num_labels=7,
+        dropout_rate=config.dropout,
+        use_cache=False,
+        torch_dtype=torch.float32  # Initialize in full precision
+    ).to(device)
+    model.gradient_checkpointing_enable()
 
-    device = torch.device('cuda')
-    torch.cuda.empty_cache()
+    dataloaders = {}
+    for split_name, split_data in dataset.items():
+        dataset_obj = XFACTDataset(split_data, tokenizer, config)
+        batch_size = config.batch_size
+        shuffle = (split_name == 'train')
+        dataloaders[split_name] = DataLoader(dataset_obj, batch_size=batch_size, shuffle=shuffle)
 
-    # Log device information
-    gpu_id = torch.cuda.current_device()
-    gpu_name = torch.cuda.get_device_name(gpu_id)
-    print(f"Process {process_id} using GPU {gpu_id}: {gpu_name}")
-    wandb.run.summary.update({
-        "process_id": process_id,
-        "gpu_id": gpu_id,
-        "gpu_name": gpu_name,
-        "seed": seed
-    })
+    if config.frozen_layers > 0:
+        for i in range(config.frozen_layers):
+            for param in model.encoder.block[i].parameters():
+                param.requires_grad = False
 
-    # Initialize variables before try block
-    model = None
-    optimizer = None
-    scheduler = None
-    scaler = torch.cuda.amp.GradScaler()
+    optimizer = AdamW(
+        model.parameters(),
+        lr=config.learning_rate,
+        betas=(config.adam_beta1, config.adam_beta2),
+        eps=config.adam_epsilon,
+        weight_decay=config.weight_decay
+    )
 
-    try:
-        # Load dataset
-        print("Loading dataset...")
-        dataset = load_dataset("utahnlp/x-fact", "all_languages")
+    num_training_steps = len(dataloaders['train']) * config.epochs
+    scheduler = get_scheduler(optimizer, num_training_steps, config)
+
+    best_dev_macro_f1 = 0
+    best_metrics = {}
+
+    for epoch in range(config.epochs):
+        print(f'\nEpoch {epoch + 1}/{config.epochs}')
         
-        # Manually shuffle the training data using seed
-        if 'train' in dataset:
-            dataset['train'] = dataset['train'].shuffle(seed=seed)
-
-        train_languages = [item['language'] for item in dataset['train']]
-        language_counts = Counter(train_languages)
-        wandb.run.summary['dataset_language_distribution'] = language_counts
-
-        # Initialize model with deterministic settings
-        print("Initializing model and tokenizer...")
-        model_name = "bigscience/mt0-small"
-        tokenizer = MT5TokenizerFast.from_pretrained(model_name)
-        model = MT5ForSequenceClassification.from_pretrained(
-            model_name,
-            num_labels=7,
-            dropout_rate=config.dropout,
-            use_cache=False
-        ).to(device)
-
-        if model is None:
-            raise RuntimeError("Failed to initialize model")
-
-        model = model.train()
-        model.gradient_checkpointing_enable()
-
-        print("Initializing dataloaders...")
-        # Initialize dataloaders with process-specific worker_init_fn
-        def worker_init_fn(worker_id):
-            worker_seed = seed + worker_id
-            np.random.seed(worker_seed)
-            random.seed(worker_seed)
-            torch.manual_seed(worker_seed)
-
-        dataloaders = {}
-        for split_name, split_data in dataset.items():
-            try:
-                dataset_obj = XFACTDataset(split_data, tokenizer, config)
-                batch_size = config.batch_size
-                shuffle = (split_name == 'train')
-                dataloaders[split_name] = DataLoader(
-                    dataset_obj,
-                    batch_size=batch_size,
-                    shuffle=shuffle,
-                    worker_init_fn=worker_init_fn,
-                    num_workers=2,
-                    pin_memory=True,
-                    persistent_workers=True
-                )
-                print(f"Created dataloader for {split_name} with {len(dataset_obj)} samples")
-            except Exception as e:
-                print(f"Error creating dataloader for {split_name}: {str(e)}")
-                raise
-
-        if config.frozen_layers > 0:
-            for i in range(config.frozen_layers):
-                for param in model.encoder.block[i].parameters():
-                    param.requires_grad = False
-            print(f"Froze first {config.frozen_layers} layers")
-
-        optimizer = AdamW(
-            model.parameters(),
-            lr=config.learning_rate,
-            betas=(config.adam_beta1, config.adam_beta2),
-            eps=config.adam_epsilon,
-            weight_decay=config.weight_decay
+        train_loss, train_macro_f1, train_micro_f1, train_lang_metrics = train_epoch(
+            model, dataloaders['train'], optimizer, scheduler, scaler, device, config
         )
-
-        num_training_steps = len(dataloaders['train']) * config.epochs
-        scheduler = get_scheduler(optimizer, num_training_steps, config)
-
-        best_dev_macro_f1 = 0
-        best_metrics = {}
-
-        # Training loop
-        for epoch in range(config.epochs):
-            print(f'\nProcess {process_id} - Epoch {epoch + 1}/{config.epochs}')
-
-            train_loss, train_macro_f1, train_micro_f1, train_lang_metrics = train_epoch(
-                model, dataloaders['train'], optimizer, scheduler, scaler, device, config
+        
+        metrics = {'epoch': epoch + 1}
+        
+        metrics.update({
+            'train_loss': train_loss,
+            'train_macro_f1': train_macro_f1,
+            'train_micro_f1': train_micro_f1
+        })
+        metrics.update({f'train_{k}': v for k, v in train_lang_metrics.items()})
+        
+        for split in ['dev', 'test', 'ood', 'zeroshot']:
+            loss, macro_f1, micro_f1, lang_metrics = evaluate(
+                model, dataloaders[split], device, split
             )
+            metrics.update({
+                f'{split}_loss': loss,
+                f'{split}_macro_f1': macro_f1,
+                f'{split}_micro_f1': micro_f1
+            })
+            metrics.update(lang_metrics)
 
-            metrics = {
-                'epoch': epoch + 1,
-                'train_loss': train_loss,
-                'train_macro_f1': train_macro_f1,
-                'train_micro_f1': train_micro_f1,
-                'process_id': process_id
-            }
-            metrics.update({f'train_{k}': v for k, v in train_lang_metrics.items()})
+        wandb.log(metrics)
 
-            for split in ['dev', 'test', 'ood', 'zeroshot']:
-                loss, macro_f1, micro_f1, lang_metrics = evaluate(
-                    model, dataloaders[split], device, split
-                )
-                metrics.update({
-                    f'{split}_loss': loss,
-                    f'{split}_macro_f1': macro_f1,
-                    f'{split}_micro_f1': micro_f1
-                })
-                metrics.update(lang_metrics)
+        # Save best model based on dev macro F1
+        if metrics['dev_macro_f1'] > best_dev_macro_f1:
+            best_dev_macro_f1 = metrics['dev_macro_f1']
+            best_metrics = {f'best_{k}': v for k, v in metrics.items()}
+            
+            model_path = os.path.join(wandb.run.dir, 'best_model.pt')
+            torch.save(model.state_dict(), model_path)
+            wandb.save('best_model.pt')
 
-            wandb.log(metrics)
-
-            # Save best model with process-specific name
-            if metrics['dev_macro_f1'] > best_dev_macro_f1:
-                best_dev_macro_f1 = metrics['dev_macro_f1']
-                best_metrics = {f'best_{k}': v for k, v in metrics.items()}
-
-                model_path = os.path.join(wandb.run.dir, f'best_model_process{process_id}.pt')
-                torch.save({
-                    'model_state_dict': model.state_dict(),
-                    'optimizer_state_dict': optimizer.state_dict(),
-                    'scheduler_state_dict': scheduler.state_dict(),
-                    'epoch': epoch,
-                    'best_dev_macro_f1': best_dev_macro_f1,
-                    'config': config._items,
-                    'seed': seed,
-                    'process_id': process_id
-                }, model_path)
-                wandb.save(f'best_model_process{process_id}.pt')
-
-        wandb.log(best_metrics)
-
-    except Exception as e:
-        print(f"Error in process {process_id}: {str(e)}")
-        raise e
-
-    finally:
-        # Safe cleanup
-        if 'model' in locals() and model is not None:
-            del model
-        if 'optimizer' in locals() and optimizer is not None:
-            del optimizer
-        if 'scheduler' in locals() and scheduler is not None:
-            del scheduler
-        torch.cuda.empty_cache()
-        wandb.finish()
-
+    wandb.log(best_metrics)
+ 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--sweep_id', type=str, required=True)
+    parser.add_argument('--sweep_id', type=str, required=True, help='W&B sweep ID')
     args = parser.parse_args()
 
-    WANDB_PROJECT = "mt0-search"
-    WANDB_ENTITY = "aniezka"
-
+    WANDB_PROJECT = "mt0-search" 
+    WANDB_ENTITY = "aniezka"       
+    
     sweep_configuration = {
-        'method': 'bayes',
-        'metric': {
-            'name': 'dev_macro_f1',
-            'goal': 'maximize'
+    'method': 'bayes',
+    'metric': {
+        'name': 'dev_macro_f1',
+        'goal': 'maximize'
+    },
+    'parameters': {
+        'learning_rate': {
+            'distribution': 'log_uniform_values',
+            'min': 5e-6,  # Reduced minimum learning rate
+            'max': 5e-5   # Reduced maximum learning rate
         },
-        'parameters': {
-            'learning_rate': {
-                'distribution': 'log_uniform_values',
-                'min': 5e-7,
-                'max': 1e-6
-            },
-            'weight_decay': {
-                'distribution': 'log_uniform_values',
-                'min': 1e-4,
-                'max': 1e-2
-            },
-            'batch_size': {
-                'value': 2
-            },
-            'gradient_clip_val': {
-                'value': 0.1
-            },
-            'adam_beta2': {
-                'value': 0.999
-            },
-            'warmup_ratio': {
-                'value': 0.1
-            },
-            'accumulation_steps': {
-                'value': 8
-            },
-            'adam_beta1': {
-                'value': 0.9
-            },
-            'max_length': {
-                'value': 128
-            },
-            'scheduler_type': {
-                'value': 'linear'
-            },
-            'label_smoothing': {
-                'value': 0.05
-            },
-            'dropout': {
-                'value': 0.2
-            },
-            'frozen_layers': {
-                'value': 2
-            },
-            'input_format': {
-                'value': 'language_first'
-            },
-            'adam_epsilon': {
-                'value': 1e-8
-            },
-            'epochs': {
-                'value': 10
-            }
+        'weight_decay': {
+            'distribution': 'log_uniform_values',
+            'min': 1e-4,
+            'max': 1e-2
+        },
+        'batch_size': {
+            'values': [4, 8]  # Reduced batch sizes
+        },
+        'adam_beta2': {
+            'values': [0.999]  # Simplified to most stable value
+        },
+        'warmup_ratio': {
+            'values': [0.1]  # Simplified to single stable value
+        },
+        'adam_beta1': {
+            'value': 0.9
+        },
+        'max_length': {
+            'value': 256
+        },
+        'scheduler_type': {
+            'value': 'linear'  # Simplified to most stable scheduler
+        },
+        'gradient_clip_val': {
+            'value': 0.5  # Reduced from 1.0
+        },
+        'label_smoothing': {
+            'value': 0.1  # Set to help with training stability
+        },
+        'dropout': {
+            'value': 0.1
+        },
+        'frozen_layers': {
+            'value': 0
+        },
+        'input_format': {
+            'value': 'language_first'
+        },
+        'accumulation_steps': {
+            'value': 4  # Fixed value to reduce complexity
+        },
+        'adam_epsilon': {
+            'value': 1e-8
+        },
+        'epochs': {
+            'value': 10  # Fixed to reduce complexity during debugging
         }
     }
+}
+   
 
-    if args.sweep_id.lower() == "none":
+    if args.sweep_id == "none":
         sweep_id = wandb.sweep(
             sweep_configuration,
             project=WANDB_PROJECT,
             entity=WANDB_ENTITY
         )
         print(f"Created sweep with ID: {sweep_id}")
-        
-        sweep_id_file = "/scratch/hshcharbakova/LCT-Experiments/current_sweep_id.txt"
-        with open(sweep_id_file, 'w') as f:
-            f.write(sweep_id)
     else:
         sweep_id = args.sweep_id
 
+    # Each agent will run 20 trials
     wandb.agent(
         sweep_id,
         function=train,
-        count=1,
+        count=20,
         project=WANDB_PROJECT,
         entity=WANDB_ENTITY
     )
 
-
-if __name__ == "__main__" :
+if __name__ == "__main__":
     main()

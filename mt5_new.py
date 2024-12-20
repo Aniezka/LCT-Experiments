@@ -15,17 +15,23 @@ from sklearn.metrics import f1_score
 import wandb
 from typing import Dict, List
 import logging
+from collections import Counter
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 LABEL_MAP = {
     'false': 0,
+    'mostly false': 1,
     'mostly_false': 1,
+    'partly true': 2,
     'partly_true': 2,
+    'partly true/misleading': 2,
+    'mostly true': 3,
     'mostly_true': 3,
     'true': 4,
     'unverifiable': 5,
+    'complicated/hard to categorise': 6,
     'other': 6
 }
 
@@ -41,25 +47,14 @@ class XFACTDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         item = self.data[idx]
         
-        # Format input based on configuration
-        if hasattr(self, 'input_format') and self.input_format == 'claim_first':
-            text = f"claim: {item['claim']} language: {item['language']} "
-        else:  # default to language_first
-            text = f"language: {item['language']} claim: {item['claim']} "
-            
-        # Add evidence
-        for i in range(1, 6):
+        # Combine claim and evidence
+        text = f"claim: {item['claim']} "
+        for i in range(1, 6):  # evidence_1 to evidence_5
             evidence_key = f'evidence_{i}'
             if evidence_key in item and item[evidence_key]:
                 text += f"evidence_{i}: {item[evidence_key]} "
-                
-        # Add metadata if available
-        if 'claimant' in item and item['claimant']:
-            text += f"claimant: {item['claimant']} "
-        if 'claimDate' in item and item['claimDate']:
-            text += f"date: {item['claimDate']} "
         
-        # Tokenize - let the tokenizer handle special tokens
+        # Tokenize
         encoding = self.tokenizer(
             text,
             max_length=self.max_length,
@@ -68,10 +63,16 @@ class XFACTDataset(torch.utils.data.Dataset):
             return_tensors='pt'
         )
         
+        # Handle labels more robustly
+        label = item['label'].lower()
+        if label not in LABEL_MAP:
+            logger.warning(f"Unknown label encountered: {label}, defaulting to 'other'")
+            label = 'other'
+        
         return {
             'input_ids': encoding['input_ids'].squeeze(),
             'attention_mask': encoding['attention_mask'].squeeze(),
-            'labels': torch.tensor(LABEL_MAP[item['label']]),
+            'labels': torch.tensor(LABEL_MAP[label]),
             'language': item['language']
         }
 
@@ -104,15 +105,23 @@ def train(config=None):
         tokenizer = MT5TokenizerFast.from_pretrained('google/mt5-base')
         model = MT5ForSequenceClassification.from_pretrained(
             'google/mt5-base',
-            num_labels=len(LABEL_MAP),
-            gradient_checkpointing=True  # Enable gradient checkpointing
+            num_labels=len(LABEL_MAP)
         )
+        
+        # Enable gradient checkpointing after model initialization
+        model.gradient_checkpointing_enable()
         
         # Enable mixed precision training
         scaler = torch.cuda.amp.GradScaler()
         
         # Load dataset
-        dataset = load_dataset('XFACT')
+        dataset = load_dataset("utahnlp/x-fact", "all_languages")
+        
+        # Track language distribution
+        train_languages = [item['language'] for item in dataset['train']]
+        language_counts = Counter(train_languages)
+        wandb.run.summary['dataset_language_distribution'] = dict(language_counts)
+        
         train_dataset = XFACTDataset(dataset['train'], tokenizer)
         dev_dataset = XFACTDataset(dataset['dev'], tokenizer)
         test_dataset = XFACTDataset(dataset['test'], tokenizer)
@@ -138,6 +147,11 @@ def train(config=None):
             load_best_model_at_end=True,
             metric_for_best_model="macro_f1",
             report_to="wandb",
+            gradient_accumulation_steps=config.accumulation_steps,
+            max_grad_norm=config.gradient_clip_val,
+            warmup_ratio=config.warmup_ratio,
+            fp16=True,
+            save_total_limit=3
         )
         
         # Initialize trainer
@@ -188,32 +202,29 @@ def main():
     
     sweep_configuration = {
         'method': 'bayes',
-        'metric': {'name': 'dev_macro_f1', 'goal': 'maximize'},
+        'metric': {'name': 'macro_f1', 'goal': 'maximize'},
         'parameters': {
             'learning_rate': {
                 'distribution': 'log_uniform',
-                'min': 1e-6,
-                'max': 1e-4
+                'min': 1e-5,
+                'max': 1e-3
             },
             'batch_size': {
-                'values': [4, 8, 16]
+                'values': [8, 16, 32]
             },
             'epochs': {
-                'values': [5, 7, 10]
+                'values': [3, 5, 7]
             },
             'weight_decay': {
-                'distribution': 'log_uniform',
-                'min': 1e-4,
-                'max': 1e-2
+                'distribution': 'uniform',
+                'min': 0.0,
+                'max': 0.3
             },
             'warmup_ratio': {
                 'values': [0.1, 0.15, 0.2]
             },
             'gradient_clip_val': {
                 'values': [0.1, 0.5, 1.0]
-            },
-            'input_format': {
-                'values': ['language_first', 'claim_first']
             },
             'accumulation_steps': {
                 'values': [2, 4, 8]

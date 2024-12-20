@@ -149,18 +149,18 @@ def evaluate(model, eval_loader, device, split_name="eval"):
             attention_mask = batch['attention_mask'].to(device)
             labels = batch['labels'].to(device)
             languages = batch['languages']
+            with torch.cuda.amp.autocast():
+                outputs = model(
+                    input_ids=input_ids,
+                    attention_mask=attention_mask,
+                    labels=labels
+                )
 
-            outputs = model(
-                input_ids=input_ids,
-                attention_mask=attention_mask,
-                labels=labels
-            )
-
-            total_loss += outputs.loss.item()
-            preds = torch.argmax(outputs.logits, dim=1)
-            all_preds.extend(preds.cpu().numpy())
-            all_labels.extend(labels.cpu().numpy())
-            all_languages.extend(languages)
+                total_loss += outputs.loss.item()
+                preds = torch.argmax(outputs.logits, dim=1)
+                all_preds.extend(preds.cpu().numpy())
+                all_labels.extend(labels.cpu().numpy())
+                all_languages.extend(languages)
 
     macro_f1, micro_f1 = calculate_metrics(all_labels, all_preds)
     language_metrics = calculate_language_metrics(all_labels, all_preds, all_languages)
@@ -171,7 +171,7 @@ def evaluate(model, eval_loader, device, split_name="eval"):
     
     return total_loss / len(eval_loader), macro_f1, micro_f1, prefixed_language_metrics
 
-def train_epoch(model, train_loader, optimizer, scheduler, device, config):
+def train_epoch(model, train_loader, optimizer, scheduler, scaler, device, config):
     model.train()
     total_loss = 0
     all_preds = []
@@ -184,15 +184,16 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, config):
         attention_mask = batch['attention_mask'].to(device)
         labels = batch['labels'].to(device)
         languages = batch['languages']
+        
+        with torch.cuda.amp.autocast():
+            outputs = model(
+                input_ids=input_ids,
+                attention_mask=attention_mask,
+                labels=labels
+            )
 
-        outputs = model(
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels
-        )
-
-        loss = outputs.loss / config.accumulation_steps
-        loss.backward()
+            loss = outputs.loss / config.accumulation_steps
+            scaler.scale(loss).backward()  # Use scaler for backward pass
 
         with torch.no_grad():
             preds = torch.argmax(outputs.logits, dim=1)
@@ -203,10 +204,12 @@ def train_epoch(model, train_loader, optimizer, scheduler, device, config):
         total_loss += loss.item() * config.accumulation_steps
 
         if (batch_idx + 1) % config.accumulation_steps == 0:
+            scaler.unscale_(optimizer)  # Unscale gradients
             torch.nn.utils.clip_grad_norm_(model.parameters(), config.gradient_clip_val)
-            optimizer.step()
+            scaler.step(optimizer)  # Use scaler for optimizer step
+            scaler.update()  # Update scaler
             scheduler.step()
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
 
     macro_f1, micro_f1 = calculate_metrics(all_labels, all_preds)
     language_metrics = calculate_language_metrics(all_labels, all_preds, all_languages)
@@ -233,6 +236,8 @@ def get_scheduler(optimizer, num_training_steps, config):
 def train():
     run = wandb.init()
     config = wandb.config
+
+    scaler = torch.cuda.amp.GradScaler()
     
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
@@ -242,15 +247,17 @@ def train():
     train_languages = [item['language'] for item in dataset['train']]
     language_counts = Counter(train_languages)
     wandb.run.summary['dataset_language_distribution'] = language_counts
-
+    
     # Initialize MT0-base model and tokenizer
     model_name = "bigscience/mt0-base"
-    tokenizer = MT5TokenizerFast.from_pretrained(model_name)
+    tokenizer = MT5TokenizerFast.from_pretrained(model_name)  # This line was missing
     model = MT5ForSequenceClassification.from_pretrained(
             model_name,
             num_labels=7,
-            dropout_rate=config.dropout
-        ).to(device)
+            dropout_rate=config.dropout,
+            use_cache=False  # Required for gradient checkpointing
+    ).to(device)  # .to(device) was missing
+    model.gradient_checkpointing_enable()
 
     dataloaders = {}
     for split_name, split_data in dataset.items():
@@ -283,9 +290,8 @@ def train():
     for epoch in range(config.epochs):
         print(f'\nEpoch {epoch + 1}/{config.epochs}')
         
-        # Training
         train_loss, train_macro_f1, train_micro_f1, train_lang_metrics = train_epoch(
-            model, dataloaders['train'], optimizer, scheduler, device, config
+            model, dataloaders['train'], optimizer, scheduler, scaler, device, config  # Added scaler here
         )
         
         # Evaluation
@@ -337,7 +343,7 @@ def main():
 
     os.environ["CUDA_VISIBLE_DEVICES"] = str(args.gpu_id)
 
-    WANDB_PROJECT = "mt0-search" 
+    WANDB_PROJECT = "xlmr-search" 
     WANDB_ENTITY = "aniezka"       
     
     sweep_configuration = {
@@ -358,7 +364,7 @@ def main():
                 'max': 1e-2
             },
             'batch_size': {
-                'values': [4, 8, 16]
+                'values': [1, 2, 4]  # Reduced batch sizes for limited GPU memory
             },
             'adam_beta2': {
                 'values': [0.98, 0.99]
@@ -370,7 +376,7 @@ def main():
                 'value': 0.9
             },
             'max_length': {
-                'value': 512
+                'value': 256  # Reduced sequence length to save memory
             },
             'patience': {
                 'value': 3

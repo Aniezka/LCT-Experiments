@@ -103,7 +103,7 @@ class XFACTDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = config.max_length
         self.input_format = config.input_format
-
+        
         self.label_map = {
             'false': 0,
             'mostly_false': 1,
@@ -119,7 +119,7 @@ class XFACTDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        text = format_input(item, self.input_format)
+        text = format_input(item, self.input_format)  # Use the existing format_input function
 
         encoding = self.tokenizer(
             text,
@@ -129,18 +129,14 @@ class XFACTDataset(Dataset):
             return_tensors='pt'
         )
 
-        # Squeeze to remove batch dimension added by return_tensors='pt'
-        input_ids = encoding['input_ids'].squeeze()
-        attention_mask = encoding['attention_mask'].squeeze()
-        label = torch.tensor(self.label_map.get(item['label'].lower(), 6))
-        
+        label = self.label_map.get(item['label'].lower(), 6)
         return {
-            'input_ids': input_ids,
-            'attention_mask': attention_mask,
-            'labels': label,
+            'input_ids': encoding['input_ids'].squeeze(),
+            'attention_mask': encoding['attention_mask'].squeeze(),
+            'labels': torch.tensor(label),
             'languages': item['language']
         }
-
+        
 def evaluate(model, eval_loader, device, split_name="eval"):
     model.eval()
     total_loss = 0

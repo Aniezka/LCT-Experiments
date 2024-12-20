@@ -103,6 +103,9 @@ class XFACTDataset(Dataset):
         self.tokenizer = tokenizer
         self.max_length = config.max_length
         self.input_format = config.input_format
+
+        # Set up tokenizer
+        self.tokenizer.pad_token = self.tokenizer.eos_token
         
         self.label_map = {
             'false': 0,
@@ -119,20 +122,37 @@ class XFACTDataset(Dataset):
 
     def __getitem__(self, idx):
         item = self.data[idx]
-        text = format_input(item, self.input_format)  # Use the existing format_input function
+        text = format_input(item, self.input_format)
 
+        # Add EOS token if not present
+        if not text.endswith(self.tokenizer.eos_token):
+            text = text + " " + self.tokenizer.eos_token
+
+        # Tokenize with fixed settings
         encoding = self.tokenizer(
             text,
-            max_length=self.max_length,
-            padding='max_length',
+            padding=False,  # We'll handle padding after tokenization
             truncation=True,
-            return_tensors='pt'
+            max_length=self.max_length - 1,  # Leave room for final EOS
+            add_special_tokens=False,  # We'll add them manually
+            return_tensors=None
         )
 
+        # Add final EOS token
+        input_ids = encoding['input_ids'] + [self.tokenizer.eos_token_id]
+        attention_mask = encoding['attention_mask'] + [1]
+
+        # Pad to max length
+        padding_length = self.max_length - len(input_ids)
+        if padding_length > 0:
+            input_ids = input_ids + ([self.tokenizer.pad_token_id] * padding_length)
+            attention_mask = attention_mask + ([0] * padding_length)
+
         label = self.label_map.get(item['label'].lower(), 6)
+        
         return {
-            'input_ids': encoding['input_ids'].squeeze(),
-            'attention_mask': encoding['attention_mask'].squeeze(),
+            'input_ids': torch.tensor(input_ids),
+            'attention_mask': torch.tensor(attention_mask),
             'labels': torch.tensor(label),
             'languages': item['language']
         }
@@ -362,12 +382,17 @@ def main():
 
         model_name = "google/mt5-base"
         tokenizer = MT5Tokenizer.from_pretrained(model_name)
+        tokenizer.pad_token = tokenizer.eos_token
+        
         model = MT5ForSequenceClassification.from_pretrained(
             model_name,
             num_labels=7,
             dropout_rate=config.dropout,
             problem_type="single_label_classification"
         )
+        
+        # Ensure model uses same pad token as tokenizer
+        model.config.pad_token_id = tokenizer.pad_token_id
         
         model.gradient_checkpointing_enable()
         model = model.to(device)

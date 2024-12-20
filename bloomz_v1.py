@@ -340,7 +340,9 @@ def main():
     parser.add_argument('--sweep_id', type=str, required=True, help='W&B sweep ID')
     args = parser.parse_args()
 
-    WANDB_PROJECT = "mt0-search" 
+    # No need to set CUDA_VISIBLE_DEVICES as it's handled by Condor
+    
+    WANDB_PROJECT = "xlmr-search" 
     WANDB_ENTITY = "aniezka"       
     
     sweep_configuration = {
@@ -417,6 +419,15 @@ def main():
         print(f"Created sweep with ID: {sweep_id}")
     else:
         sweep_id = args.sweep_id
+
+    wandb.agent(
+        sweep_id,
+        function=train,
+        count=20,
+        project=WANDB_PROJECT,
+        entity=WANDB_ENTITY
+    )
+
         
 if __name__ == "__main__":
     main()
